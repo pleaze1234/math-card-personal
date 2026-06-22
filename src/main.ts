@@ -894,17 +894,92 @@ function scoreLeftIndent(page: PageInfo | { width: number; height: number }, lin
   return -25;
 }
 
+function isGuideNumberLine(text: string): boolean {
+  const n = normalizeText(text);
+  if (!/^\d{1,4}\s*\./.test(n)) return false;
+  return /^\d{1,4}\s*\.\s*(구성|사용법|공부법|학습법|공부|사용|활용|안내|주의|유의|목차|차례|구분|범위|정오표|교재|커리큘럼|강의|수업|part\b|chapter\b|section\b)/i.test(n);
+}
+
+function hasMatchingQuestionMarker(text: string, number: number): boolean {
+  const compact = normalizeText(text).replace(/\s+/g, '');
+  return compact.includes(`【${number}】`) || compact.includes(`[${number}]`);
+}
+
+
+function hasChoiceMarker(text: string): boolean {
+  const n = normalizeText(text);
+  return /[①②③④⑤⑥⑦⑧⑨ⓐⓑⓒⓓⓔ㉠㉡㉢㉣]/.test(n) || /(?:^|\s)(?:ㄱ|ㄴ|ㄷ|ㄹ)\s*[.)]/.test(n);
+}
+
+function hasQuestionPhrase(text: string): boolean {
+  const n = normalizeText(text);
+  return /(값은|구하|고르|찾으|옳|틀린|바르|몇|개수|합은|곱은|해는|근은|좌표|기울기|미분계수|도함수|극한값|극한|연속|불연속|정의역|치역|그래프|접선|방정식|함수|다음 중|만족|간단히|나열|계산|모두)/.test(n) || /[?？]$/.test(n);
+}
+
+function hasMathSignal(text: string): boolean {
+  const n = normalizeText(text);
+  return /(lim|sin|cos|tan|ln|log|sinh|cosh|tanh|arc|sec|csc|cot|sqrt|함수|방정식|수열|곡선|도함수|미분|극한|연속|접선)/i.test(n) || /[=<>≤≥∑∫√′]/.test(n);
+}
+
+function nearbyLines(page: PageInfo, line: LineLite, maxLines = 8): LineLite[] {
+  return page.lines
+    .filter(l => l.col === line.col && l.y >= line.y && l.y - line.y < Math.max(120, line.h * 14))
+    .sort((a, b) => a.y - b.y || a.x - b.x)
+    .slice(0, maxLines);
+}
+
+function scoreQuestionContext(page: PageInfo, line: LineLite, number: number): number {
+  const windowLines = nearbyLines(page, line, 10);
+  const joined = windowLines.map(l => l.text).join(' ');
+  let score = 0;
+  if (hasMatchingQuestionMarker(line.text, number)) score += 58;
+  else if (hasMatchingQuestionMarker(joined, number)) score += 32;
+  if (hasQuestionPhrase(line.text)) score += 26;
+  else if (hasQuestionPhrase(joined)) score += 14;
+  if (hasChoiceMarker(joined)) score += 28;
+  if (hasMathSignal(line.text)) score += 12;
+  else if (hasMathSignal(joined)) score += 6;
+  if (/^Topic\s*\d/i.test(page.lines[0]?.text || '') || page.lines.some(l => /^Topic\s*\d/i.test(l.text))) score += 6;
+  if (isGuideNumberLine(line.text)) score -= 120;
+  if (/^(part|chapter|topic)\s*[-\d]/i.test(normalizeText(line.text))) score -= 80;
+  if (/^\d{1,4}\s*\.\s*$/.test(normalizeText(line.text))) score -= 20;
+  return score;
+}
+
+function filterQuestionCandidatesForPage(page: PageInfo, raw: Anchor[]): Anchor[] {
+  const scored = raw
+    .map(anchor => {
+      const line = page.lines.find(l => l.pageNum === anchor.pageNum && l.cellIndex === anchor.cellIndex && Math.abs(l.y - anchor.y) < 2 && l.text === anchor.lineText);
+      const contextScore = line ? scoreQuestionContext(page, line, anchor.number) : 0;
+      return { ...anchor, score: anchor.score + contextScore };
+    })
+    .filter(anchor => anchor.score >= 78);
+
+  const pageText = page.lines.map(l => l.text).join(' ');
+  const choiceCount = page.lines.filter(l => hasChoiceMarker(l.text)).length;
+  const markerCount = scored.filter(a => hasMatchingQuestionMarker(a.lineText, a.number)).length;
+  const phraseCount = scored.filter(a => hasQuestionPhrase(a.lineText)).length;
+  const guideCount = page.lines.filter(l => isGuideNumberLine(l.text)).length;
+  const topicBonus = /Topic\s*\d/i.test(pageText) ? 12 : 0;
+  const pageScore = scored.length * 16 + markerCount * 24 + phraseCount * 10 + Math.min(4, choiceCount) * 6 + topicBonus - guideCount * 26;
+
+  if (scored.length === 0) return [];
+  if (pageScore < 34 && markerCount === 0) return [];
+  return scored.sort(anchorSort);
+}
+
 function detectQuestionAnchor(page: PageInfo, line: LineLite): Anchor | null {
   const text = normalizeText(line.text);
   const m = text.match(/^(\d{1,4})\s*\.\s*(?=\S|$)/);
   if (!m) return null;
+  if (isGuideNumberLine(text)) return null;
   const number = Number(m[1]);
   if (!Number.isFinite(number) || number < 1 || number > 9999) return null;
   const b = colBounds(page, line.col);
   const colWidth = Math.max(1, b.x2 - b.x1);
   const indentRatio = Math.max(0, line.x - b.x1) / colWidth;
   if (indentRatio > 0.42) return null;
-  let score = 70 + scoreLeftIndent(page, line);
+  let score = 42 + scoreLeftIndent(page, line);
   if (line.h >= 10) score += 3;
   if (/^\d{1,4}\s*\.\s*$/.test(text)) score -= 8;
   return {
@@ -1134,9 +1209,10 @@ async function parsePdfToImages(file: File, log: (msg: string, progress: number)
       hasQuestionPage: false
     };
     pageInfo.lines = buildLines(i, width, height, items);
-    pageInfo.questionCandidates = pageInfo.lines
+    const rawQuestionCandidates = pageInfo.lines
       .map(line => detectQuestionAnchor(pageInfo, line))
       .filter((a): a is Anchor => Boolean(a));
+    pageInfo.questionCandidates = filterQuestionCandidatesForPage(pageInfo, rawQuestionCandidates);
     pageInfo.hasQuestionPage = pageInfo.questionCandidates.length > 0;
     if (!pageInfo.hasQuestionPage) {
       pageInfo.solutionCandidates = pageInfo.lines
