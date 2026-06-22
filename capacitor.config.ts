@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
   appId: 'com.personal.mathcard',
-  appName: 'MathCard',
+  appName: 'Math Cycle',
   webDir: 'dist',
   server: {
     androidScheme: 'https'

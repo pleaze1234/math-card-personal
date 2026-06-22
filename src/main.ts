@@ -1,10 +1,12 @@
 import './style.css';
+import { App as CapacitorApp } from '@capacitor/app';
 import * as pdfjsLib from 'pdfjs-dist/build/pdf.mjs';
 import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 
 (pdfjsLib as any).GlobalWorkerOptions.workerSrc = pdfWorker;
 
 type StoreName = 'workbooks' | 'cards' | 'cycles';
+type AnswerState = 'correct' | 'wrong';
 
 type Workbook = {
   id: string;
@@ -19,12 +21,13 @@ type Card = {
   number: number;
   questionImage: string;
   solutionImage: string;
-  rating: number;
-  note: string;
   drawingImage: string;
   attempts: number;
   lastMs: number;
+  lastResult?: AnswerState | null;
 };
+
+type CycleHistoryEntry = { cardId: string; answer: AnswerState };
 
 type Cycle = {
   id: string;
@@ -35,15 +38,21 @@ type Cycle = {
   correct: number;
   wrong: number;
   done: boolean;
+  order?: 'seq' | 'rand';
+  workbookNames?: string[];
+  wrongIds?: string[];
+  history?: CycleHistoryEntry[];
 };
 
-type View = 'books' | 'cycles' | 'card' | 'solve';
+type View = 'books' | 'cycles' | 'card' | 'solve' | 'wrongList';
 
 type AppState = {
   view: View;
   selectedWorkbookId: string | null;
   selectedCardId: string | null;
   activeCycleId: string | null;
+  selectedCycleId: string | null;
+  pendingAnswer: AnswerState | null;
   revealed: boolean;
   timerStart: number;
   elapsedMs: number;
@@ -65,6 +74,8 @@ const state: AppState = {
   selectedWorkbookId: null,
   selectedCardId: null,
   activeCycleId: null,
+  selectedCycleId: null,
+  pendingAnswer: null,
   revealed: false,
   timerStart: 0,
   elapsedMs: 0,
@@ -74,45 +85,46 @@ const state: AppState = {
 };
 
 const T = {
-  title: '\uc218\ud559 \uce74\ub4dc',
-  books: '\ubb38\uc81c\uc9d1',
-  cycles: '\uc0ac\uc774\ud074',
-  importPdf: 'PDF \ub123\uae30',
-  reset: '\uc804\uccb4 \uc0ad\uc81c',
-  noBooks: '\uc544\uc9c1 \ubb38\uc81c\uc9d1\uc774 \uc5c6\uc2b5\ub2c8\ub2e4. PDF\ub97c \ub123\uc5b4\uc8fc\uc138\uc694.',
-  cards: '\uce74\ub4dc',
-  solve: '\ubb38\uc81c \ud480\uae30',
-  replaceQ: '\ubb38\uc81c \uc774\ubbf8\uc9c0 \uad50\uccb4',
-  replaceS: '\ud574\uc124 \uc774\ubbf8\uc9c0 \uad50\uccb4',
-  back: '\ub4a4\ub85c',
-  question: '\ubb38\uc81c',
-  solution: '\ud574\uc124',
-  reveal: '\ud574\uc124\ubcf4\uae30',
-  correct: '\ub9de\uc74c',
-  wrong: '\ud2c0\ub9bc',
-  rating: '\ub09c\uc774\ub3c4',
-  note: '\uba54\ubaa8',
-  drawing: '\ub4dc\ub85c\uc789',
-  clearDrawing: '\uadf8\ub9bc \uc9c0\uc6b0\uae30',
-  newCycle: '\uc0c8 \uc0ac\uc774\ud074',
-  start: '\uc2dc\uc791',
-  continue: '\uc774\uc5b4 \ud480\uae30',
+  appName: 'Math Cycle',
+  kicker: '온디바이스 수학 트레이너',
+  books: '문제집 관리',
+  cycles: '학습 사이클',
+  importPdf: 'PDF 넣기',
+  reset: '전체 삭제',
+  noBooks: '아직 문제집이 없습니다. PDF를 넣어주세요.',
+  cards: '문항',
+  solve: '문제 풀기',
+  replaceQ: '문제 이미지 교체',
+  replaceS: '해설 이미지 교체',
+  back: '뒤로',
+  question: '문제',
+  solution: '해설',
+  reveal: '해설보기',
+  correct: '맞음',
+  wrong: '틀림',
+  drawing: '드로잉',
+  clearDrawing: '그림 지우기',
+  newCycle: '사이클 제작',
+  start: '시작',
+  continue: '계속 학습',
+  wrongCards: '오답 문항',
+  delete: '삭제',
   prevProblem: '이전 문제',
   nextProblem: '다음 문제',
-  chooseResult: '이 문제 결과 선택',
-  chooseResultTip: '다음 문제로 넘어가려면 맞음/틀림을 선택하세요.',
-  cancel: '취소',
-  order: '\uc21c\uc11c',
-  sequential: '\uc21c\uc11c\ub300\ub85c',
-  random: '\ub79c\ub364',
-  filter: '\ubcc4\uc810 \ud544\ud130',
-  allRatings: '\uc804\uccb4',
-  parsing: 'PDF \ubd84\uc11d \uc911',
-  done: '\uc644\ub8cc',
-  elapsed: '\uc18c\uc694\uc2dc\uac04',
-  emptyCycle: '\uc0ac\uc774\ud074\uc5d0 \ub0a8\uc740 \ubb38\uc81c\uac00 \uc5c6\uc2b5\ub2c8\ub2e4.',
-  selectBook: '\ubb38\uc81c\uc9d1\uc744 \uc120\ud0dd\ud558\uc138\uc694.',
-  parsingTip: '\uc608\uc2dc PDF\ucc98\ub7fc \ubb38\uc81c \ud398\uc774\uc9c0\ub294 1. 2. 3. \ud615\uc2dd, \ud574\uc124 \ud398\uc774\uc9c0\ub294 \u30101\u3011 \ub610\ub294 (1) \ud615\uc2dd\uc744 \uae30\uc900\uc73c\ub85c \uc790\ub3d9 \uce74\ub4dc\ud654\ud569\ub2c8\ub2e4.'
+  order: '출제 순서',
+  sequential: '순서대로',
+  random: '랜덤',
+  cycleName: '사이클 이름',
+  problemCount: '문항 수',
+  progress: '진행도',
+  parsing: 'PDF 분석 중',
+  done: '완료',
+  elapsed: '소요시간',
+  emptyCycle: '사이클에 남은 문제가 없습니다.',
+  selectBook: '문제집을 선택하세요.',
+  selectResult: '맞음/틀림을 먼저 선택하세요.',
+  exitAsk: '앱을 종료할까요?',
+  parsingTip: '문제는 큰 문항 번호, 해설은 정답 표지 번호를 기준으로 자동 카드화합니다.'
 };
 
 function uid(prefix: string): string {
@@ -231,7 +243,8 @@ function selectedWorkbookCards(): Card[] {
   return cardsCache.filter(c => ids.has(c.id)).sort((a, b) => a.number - b.number);
 }
 
-type ShellNavMode = 'main' | 'pager';
+
+type ShellNavMode = 'main' | 'pager' | 'none';
 
 type PagerInfo = {
   prevLabel: string;
@@ -242,27 +255,49 @@ type PagerInfo = {
 
 function renderShell(content: string, subtitle = '', navMode?: ShellNavMode): void {
   const mode: ShellNavMode = navMode ?? ((state.view === 'card' || state.view === 'solve') ? 'pager' : 'main');
-  const navHtml = mode === 'pager' ? renderPagerNav() : renderMainNav();
+  const headerHtml = mode === 'main' ? renderMainHeader() : renderDetailHeader(subtitle);
+  const navHtml = mode === 'pager' ? renderPagerNav() : '';
   app.innerHTML = `
-    <div class="app-shell">
-      <header class="topbar">
-        <h1>MathCard</h1>
-        <p>${esc(subtitle || T.parsingTip)}</p>
-      </header>
+    <div class="app-shell ${mode === 'main' ? 'main-shell' : 'detail-shell'}">
+      ${headerHtml}
       <main class="content">${content}</main>
       ${navHtml}
     </div>
   `;
   if (mode === 'pager') attachPagerNav();
-  else attachMainNav();
+  if (mode === 'main') attachMainNav();
 }
 
-function renderMainNav(): string {
+function renderMainHeader(): string {
   return `
-    <nav class="nav nav-main">
-      <button class="${state.view === 'books' ? 'active' : ''}" id="navBooks">${T.books}</button>
-      <button class="${state.view === 'cycles' ? 'active' : ''}" id="navCycles">${T.cycles}</button>
-    </nav>
+    <header class="hero">
+      <div class="hero-top">
+        <div>
+          <p class="kicker">${T.kicker}</p>
+          <h1>${T.appName}</h1>
+        </div>
+        <div class="hero-actions">
+          <button class="icon-btn" id="headerImport" title="${T.importPdf}">✎</button>
+          <button class="icon-btn plus" id="headerNewCycle" title="${T.newCycle}">+</button>
+        </div>
+      </div>
+      <nav class="top-tabs">
+        <button class="${state.view === 'cycles' ? 'active' : ''}" id="navCycles">${T.cycles}</button>
+        <button class="${state.view === 'books' ? 'active' : ''}" id="navBooks">${T.books}</button>
+      </nav>
+    </header>
+  `;
+}
+
+function renderDetailHeader(subtitle: string): string {
+  return `
+    <header class="detail-topbar">
+      <button class="ghost back-small" id="topBackBtn">‹</button>
+      <div>
+        <p class="kicker">${T.appName}</p>
+        <h1>${esc(subtitle || '')}</h1>
+      </div>
+    </header>
   `;
 }
 
@@ -270,8 +305,10 @@ function attachMainNav(): void {
   document.querySelector('#navBooks')?.addEventListener('click', () => {
     state.view = 'books';
     state.activeCycleId = null;
+    state.selectedCycleId = null;
     state.selectedCardId = null;
     state.revealed = false;
+    state.pendingAnswer = null;
     render();
   });
   document.querySelector('#navCycles')?.addEventListener('click', () => {
@@ -279,7 +316,18 @@ function attachMainNav(): void {
     state.selectedCardId = null;
     state.activeCycleId = null;
     state.revealed = false;
+    state.pendingAnswer = null;
     render();
+  });
+  document.querySelector('#headerImport')?.addEventListener('click', () => {
+    state.view = 'books';
+    render();
+    window.setTimeout(() => (document.querySelector('#pdfInput') as HTMLInputElement | null)?.click(), 50);
+  });
+  document.querySelector('#headerNewCycle')?.addEventListener('click', () => {
+    state.view = 'cycles';
+    render();
+    window.setTimeout(() => showCycleCreateSheet(), 50);
   });
 }
 
@@ -295,16 +343,25 @@ function renderPagerNav(): string {
 
 function getPagerInfo(): PagerInfo {
   const card = cardById(state.selectedCardId);
-  const isCycleSolve = state.view === 'solve' && Boolean(state.activeCycleId);
+  const cycle = cycleById(state.activeCycleId);
   const prevCard = card ? adjacentCardFor(card, -1) : undefined;
   const nextCard = card ? adjacentCardFor(card, 1) : undefined;
 
   if (state.view === 'solve') {
+    if (cycle) {
+      const history = normalizeCycle(cycle).history || [];
+      return {
+        prevLabel: T.prevProblem,
+        nextLabel: state.revealed ? T.nextProblem : T.reveal,
+        prevDisabled: history.length === 0,
+        nextDisabled: false
+      };
+    }
     return {
       prevLabel: T.prevProblem,
       nextLabel: state.revealed ? T.nextProblem : T.reveal,
-      prevDisabled: isCycleSolve || !prevCard,
-      nextDisabled: isCycleSolve ? false : (state.revealed ? !nextCard : false)
+      prevDisabled: !prevCard,
+      nextDisabled: state.revealed ? !nextCard : false
     };
   }
 
@@ -319,6 +376,7 @@ function getPagerInfo(): PagerInfo {
 function attachPagerNav(): void {
   document.querySelector('#navPrev')?.addEventListener('click', () => void handlePagerPrev());
   document.querySelector('#navNext')?.addEventListener('click', () => void handlePagerNext());
+  document.querySelector('#topBackBtn')?.addEventListener('click', () => void handleBackIntent());
 }
 
 function workbookCardsForCard(card: Card): Card[] {
@@ -337,17 +395,43 @@ function adjacentCardFor(card: Card, delta: -1 | 1): Card | undefined {
   return cards[idx + delta];
 }
 
+
+function normalizeCycle(cycle: Cycle): Cycle {
+  cycle.order = cycle.order || 'seq';
+  cycle.workbookNames = cycle.workbookNames || [];
+  cycle.wrongIds = cycle.wrongIds || [];
+  cycle.history = cycle.history || [];
+  cycle.correct = Number(cycle.correct || 0);
+  cycle.wrong = Number(cycle.wrong || 0);
+  cycle.totalStart = Number(cycle.totalStart || cycle.queue?.length || 0);
+  cycle.queue = Array.isArray(cycle.queue) ? cycle.queue : [];
+  cycle.done = Boolean(cycle.done);
+  return cycle;
+}
+
+function recomputeWrongIds(cycle: Cycle): void {
+  const wrong = new Set<string>();
+  for (const h of cycle.history || []) if (h.answer === 'wrong') wrong.add(h.cardId);
+  cycle.wrongIds = Array.from(wrong);
+}
+
 async function saveVisibleSolveFeedback(): Promise<void> {
-  if (state.view !== 'solve' || !state.revealed || !state.selectedCardId) return;
+  if (state.view !== 'solve' || !state.selectedCardId) return;
   const card = await getOne<Card>('cards', state.selectedCardId);
   if (!card) return;
-  const noteInput = document.querySelector<HTMLTextAreaElement>('#noteInput');
-  if (noteInput) card.note = noteInput.value;
   const drawing = getCanvasDataUrl();
   if (drawing) card.drawingImage = drawing;
   if (state.elapsedMs) card.lastMs = state.elapsedMs;
+  if (state.pendingAnswer) card.lastResult = state.pendingAnswer;
   await putOne('cards', card);
   await refresh();
+}
+
+async function revealCurrent(): Promise<void> {
+  await saveVisibleSolveFeedback();
+  state.elapsedMs = performance.now() - state.timerStart;
+  state.revealed = true;
+  render();
 }
 
 async function navigateAdjacent(delta: -1 | 1): Promise<void> {
@@ -358,6 +442,7 @@ async function navigateAdjacent(delta: -1 | 1): Promise<void> {
   await saveVisibleSolveFeedback();
   state.selectedWorkbookId = next.workbookId;
   state.selectedCardId = next.id;
+  state.pendingAnswer = next.lastResult || null;
   if (state.view === 'solve') {
     startSolving(next.id, null);
   } else {
@@ -365,90 +450,147 @@ async function navigateAdjacent(delta: -1 | 1): Promise<void> {
   }
 }
 
+async function undoCyclePrevious(): Promise<void> {
+  if (!state.activeCycleId) return;
+  const cycle = await getOne<Cycle>('cycles', state.activeCycleId);
+  if (!cycle) return;
+  normalizeCycle(cycle);
+  const last = cycle.history!.pop();
+  if (!last) return;
+  if (last.answer === 'correct') cycle.correct = Math.max(0, cycle.correct - 1);
+  else cycle.wrong = Math.max(0, cycle.wrong - 1);
+  if (last.answer === 'wrong') {
+    const idx = cycle.queue.lastIndexOf(last.cardId);
+    if (idx >= 0) cycle.queue.splice(idx, 1);
+  }
+  cycle.queue.unshift(last.cardId);
+  cycle.done = false;
+  recomputeWrongIds(cycle);
+  await putOne('cycles', cycle);
+  await refresh();
+  state.selectedCardId = last.cardId;
+  state.pendingAnswer = last.answer;
+  state.revealed = true;
+  state.elapsedMs = 0;
+  state.timerStart = performance.now();
+  render();
+}
+
 async function handlePagerPrev(): Promise<void> {
-  if (state.view === 'solve' && state.activeCycleId) return;
+  if (state.view === 'solve' && state.activeCycleId) {
+    await saveVisibleSolveFeedback();
+    await undoCyclePrevious();
+    return;
+  }
   await navigateAdjacent(-1);
 }
 
 async function handlePagerNext(): Promise<void> {
   if (state.view === 'solve') {
     if (!state.revealed) {
-      state.elapsedMs = performance.now() - state.timerStart;
-      state.revealed = true;
-      render();
+      await revealCurrent();
       return;
     }
     if (state.activeCycleId) {
-      showCycleResultSheet();
+      if (!state.pendingAnswer) {
+        alert(T.selectResult);
+        return;
+      }
+      await commitCycleAnswer(state.pendingAnswer);
       return;
     }
   }
   await navigateAdjacent(1);
 }
 
-function showCycleResultSheet(): void {
-  if (document.querySelector('#cycleResultSheet')) return;
-  const sheet = document.createElement('div');
-  sheet.className = 'modal-backdrop';
-  sheet.id = 'cycleResultSheet';
-  sheet.innerHTML = `
-    <div class="modal result-modal">
-      <h2>${T.chooseResult}</h2>
-      <p class="small">${T.chooseResultTip}</p>
-      <div class="row" style="margin-top:12px">
-        <button class="danger" id="sheetWrong">${T.wrong}</button>
-        <button class="ok" id="sheetCorrect">${T.correct}</button>
-      </div>
-      <button class="secondary" style="margin-top:10px;width:100%" id="sheetCancel">${T.cancel}</button>
-    </div>
-  `;
-  document.body.appendChild(sheet);
-  document.querySelector('#sheetCancel')?.addEventListener('click', () => sheet.remove());
-  document.querySelector('#sheetWrong')?.addEventListener('click', () => {
-    sheet.remove();
-    void finishAnswer(false);
-  });
-  document.querySelector('#sheetCorrect')?.addEventListener('click', () => {
-    sheet.remove();
-    void finishAnswer(true);
-  });
+async function markResult(answer: AnswerState): Promise<void> {
+  state.pendingAnswer = answer;
+  const card = await getOne<Card>('cards', state.selectedCardId || '');
+  if (card) {
+    card.lastResult = answer;
+    const drawing = getCanvasDataUrl();
+    if (drawing) card.drawingImage = drawing;
+    await putOne('cards', card);
+    await refresh();
+  }
+  render();
+}
+
+async function commitCycleAnswer(answer: AnswerState): Promise<void> {
+  const cardId = state.selectedCardId;
+  if (!cardId || !state.activeCycleId) return;
+  await saveVisibleSolveFeedback();
+  const card = await getOne<Card>('cards', cardId);
+  if (card) {
+    card.attempts += 1;
+    card.lastMs = state.elapsedMs;
+    card.lastResult = answer;
+    await putOne('cards', card);
+  }
+  const cycle = await getOne<Cycle>('cycles', state.activeCycleId);
+  if (!cycle) return;
+  normalizeCycle(cycle);
+  const current = cycle.queue.shift() || cardId;
+  const actual = current || cardId;
+  cycle.history!.push({ cardId: actual, answer });
+  if (answer === 'correct') cycle.correct += 1;
+  else {
+    cycle.wrong += 1;
+    cycle.queue.push(actual);
+  }
+  recomputeWrongIds(cycle);
+  if (cycle.queue.length === 0) cycle.done = true;
+  await putOne('cycles', cycle);
+  await refresh();
+  if (cycle.done) {
+    alert(T.done);
+    state.view = 'cycles';
+    state.selectedCardId = null;
+    state.activeCycleId = null;
+    state.pendingAnswer = null;
+    state.revealed = false;
+    render();
+    return;
+  }
+  startSolving(cycle.queue[0], cycle.id);
 }
 
 function renderBooks(): void {
   const wbList = workbooksCache.map(wb => {
     const count = wb.cardIds.length;
     const active = state.selectedWorkbookId === wb.id ? 'active' : '';
-    return `<button class="card-tile ${active}" data-wb="${esc(wb.id)}"><strong>${esc(wb.name)}</strong><span class="small">${count} ${T.cards}</span></button>`;
+    return `<button class="book-tile ${active}" data-wb="${esc(wb.id)}"><strong>${esc(wb.name)}</strong><span>${count} ${T.cards}</span></button>`;
   }).join('');
   const selected = workbookById(state.selectedWorkbookId) ?? workbooksCache[0];
   if (!state.selectedWorkbookId && selected) state.selectedWorkbookId = selected.id;
   const cardTiles = selectedWorkbookCards().map(c => `
     <button class="card-tile" data-card="${esc(c.id)}">
       <strong>#${c.number}</strong>
-      <span class="small">${'★'.repeat(c.rating)}${'☆'.repeat(5 - c.rating)}</span>
+      <span class="small">${c.lastResult === 'wrong' ? '오답' : c.lastResult === 'correct' ? '정답' : '미풀이'}</span>
     </button>
   `).join('');
   const content = `
-    <section class="card">
-      <h2>${T.importPdf}</h2>
-      <p class="small">${T.parsingTip}</p>
-      <input type="file" accept="application/pdf,.pdf" id="pdfInput" ${state.parsing ? 'disabled' : ''} />
-      <div class="row" style="margin-top:10px">
-        <button class="secondary" id="resetBtn">${T.reset}</button>
+    <section class="section-head">
+      <div>
+        <h2>${T.books}</h2>
+        <p class="small">PDF를 넣고 문항 카드를 확인합니다.</p>
       </div>
-      ${state.parsing || state.parseLog ? `
-        <div style="margin-top:12px" class="progress-wrap"><div class="progress-bar" style="width:${Math.round(state.parseProgress * 100)}%"></div></div>
-        <div style="margin-top:10px" class="logbox">${esc(state.parseLog)}</div>
-      ` : ''}
+      <label class="primary-file"><input type="file" accept="application/pdf,.pdf" id="pdfInput" ${state.parsing ? 'disabled' : ''}>${T.importPdf}</label>
     </section>
+    ${state.parsing || state.parseLog ? `
+      <section class="card">
+        <div class="progress-wrap"><div class="progress-bar" style="width:${Math.round(state.parseProgress * 100)}%"></div></div>
+        <div style="margin-top:10px" class="logbox">${esc(state.parseLog)}</div>
+      </section>
+    ` : ''}
     <section class="card">
-      <h2>${T.books}</h2>
-      ${workbooksCache.length ? `<div class="grid">${wbList}</div>` : `<p>${T.noBooks}</p>`}
+      <div class="row tight"><h3>내 문제집</h3><button class="secondary compact" id="resetBtn">${T.reset}</button></div>
+      ${workbooksCache.length ? `<div class="book-grid">${wbList}</div>` : `<p>${T.noBooks}</p>`}
     </section>
     ${selected ? `
       <section class="card">
-        <div class="row tight"><h2>${esc(selected.name)} ${T.cards}</h2><span class="badge">${selected.cardIds.length}</span></div>
-        <div class="grid">${cardTiles || `<p>${T.noBooks}</p>`}</div>
+        <div class="row tight"><h3>${esc(selected.name)}</h3><span class="badge">${selected.cardIds.length} ${T.cards}</span></div>
+        <div class="grid cards-grid">${cardTiles || `<p>${T.noBooks}</p>`}</div>
       </section>
     ` : ''}
   `;
@@ -458,11 +600,12 @@ function renderBooks(): void {
     if (file) await handlePdfImport(file);
   });
   document.querySelector('#resetBtn')?.addEventListener('click', async () => {
-    if (confirm('Delete all local data?')) {
+    if (confirm('모든 문제집과 사이클을 삭제할까요?')) {
       await clearDB();
       state.selectedWorkbookId = null;
       state.selectedCardId = null;
       state.activeCycleId = null;
+      state.selectedCycleId = null;
       state.parseLog = '';
       await refresh();
       render();
@@ -493,13 +636,9 @@ function renderCardDetail(): void {
   const content = `
     <section class="card">
       <div class="row tight">
-        <button class="secondary" id="backBooks">${T.back}</button>
-        <h2>#${card.number}</h2>
-      </div>
-      <div class="row" style="margin-top:10px">
         <button id="solveCard">${T.solve}</button>
-        <label class="buttonlike"><input type="file" accept="image/*" id="replaceQ" class="hidden"> <button class="secondary" id="replaceQBtn" type="button">${T.replaceQ}</button></label>
-        <label class="buttonlike"><input type="file" accept="image/*" id="replaceS" class="hidden"> <button class="secondary" id="replaceSBtn" type="button">${T.replaceS}</button></label>
+        <label class="buttonlike"><input type="file" accept="image/*" id="replaceQ" class="hidden"><button class="secondary" id="replaceQBtn" type="button">${T.replaceQ}</button></label>
+        <label class="buttonlike"><input type="file" accept="image/*" id="replaceS" class="hidden"><button class="secondary" id="replaceSBtn" type="button">${T.replaceS}</button></label>
       </div>
     </section>
     <section class="card">
@@ -512,7 +651,6 @@ function renderCardDetail(): void {
     </section>
   `;
   renderShell(content, `#${card.number}`);
-  document.querySelector('#backBooks')?.addEventListener('click', () => { state.view = 'books'; render(); });
   document.querySelector('#solveCard')?.addEventListener('click', () => startSolving(card.id, null));
   document.querySelector('#replaceQBtn')?.addEventListener('click', () => (document.querySelector('#replaceQ') as HTMLInputElement).click());
   document.querySelector('#replaceSBtn')?.addEventListener('click', () => (document.querySelector('#replaceS') as HTMLInputElement).click());
@@ -530,76 +668,147 @@ async function replaceCardImage(cardId: string, field: 'questionImage' | 'soluti
   render();
 }
 
+function cycleProgress(cycle: Cycle): { done: number; total: number; pct: number } {
+  normalizeCycle(cycle);
+  const total = Math.max(1, cycle.totalStart || cycle.queue.length || 1);
+  const done = Math.min(total, cycle.correct || 0);
+  return { done, total, pct: Math.round((done / total) * 100) };
+}
+
 function renderCycles(): void {
-  const workbookOptions = workbooksCache.map(wb => `
-    <label class="check-row"><input type="checkbox" name="cycleWb" value="${esc(wb.id)}"> <span>${esc(wb.name)} <span class="small">(${wb.cardIds.length})</span></span></label>
-  `).join('');
-  const cycleList = cyclesCache.map(cyc => `
-    <div class="card">
-      <div class="row tight"><h3>${esc(cyc.name)}</h3>${cyc.done ? `<span class="badge">${T.done}</span>` : `<span class="badge">${cyc.queue.length}/${cyc.totalStart}</span>`}</div>
-      <p class="small">O ${cyc.correct} / X ${cyc.wrong}</p>
-      <button data-cycle="${esc(cyc.id)}" ${cyc.done ? 'disabled' : ''}>${T.continue}</button>
-    </div>
-  `).join('');
+  const cycleList = cyclesCache.map(raw => {
+    const cyc = normalizeCycle(raw);
+    const p = cycleProgress(cyc);
+    const orderLabel = cyc.order === 'rand' ? T.random : T.sequential;
+    const sub = `${cyc.workbookNames?.length || 0}개 문제집 · ${orderLabel}`;
+    return `
+      <article class="cycle-card">
+        <div class="cycle-head">
+          <div><h3>${esc(cyc.name)}</h3><p>${esc(sub)}</p></div>
+          <span class="progress-text">${p.done}/${p.total} (${p.pct}%)</span>
+        </div>
+        <div class="progress-wrap"><div class="progress-bar" style="width:${p.pct}%"></div></div>
+        <div class="cycle-actions">
+          <button data-cycle="${esc(cyc.id)}" ${cyc.done ? 'disabled' : ''}>${T.continue}</button>
+          <button class="secondary" data-wrong-cycle="${esc(cyc.id)}">${T.wrongCards}</button>
+          <button class="secondary danger-lite" data-delete-cycle="${esc(cyc.id)}">${T.delete}</button>
+        </div>
+      </article>
+    `;
+  }).join('');
   const content = `
-    <section class="card">
-      <h2>${T.newCycle}</h2>
-      ${workbooksCache.length ? `
-        <div class="checkbox-list">${workbookOptions}</div>
-        <div style="margin-top:10px" class="row">
-          <label>${T.order}<select id="cycleOrder"><option value="seq">${T.sequential}</option><option value="rand">${T.random}</option></select></label>
-        </div>
-        <div style="margin-top:10px">
-          <p class="small">${T.filter}</p>
-          <div class="row tight">
-            ${[0,1,2,3,4,5].map(r => `<label class="check-row"><input type="checkbox" name="ratingFilter" value="${r}"> ${r === 0 ? T.allRatings : `${r}★`}</label>`).join('')}
-          </div>
-        </div>
-        <button style="margin-top:12px" id="startCycle">${T.start}</button>
-      ` : `<p>${T.noBooks}</p>`}
+    <section class="section-head">
+      <div>
+        <h2>내 학습 사이클</h2>
+        <p class="small">진행도와 오답 문항을 따로 관리합니다.</p>
+      </div>
+      <button id="openCycleCreate">+ ${T.newCycle}</button>
     </section>
-    <section>${cycleList || `<div class="card"><p class="small">No saved cycles.</p></div>`}</section>
+    <section>${cycleList || `<div class="card"><p class="small">아직 저장된 사이클이 없습니다.</p></div>`}</section>
   `;
   renderShell(content, T.cycles);
-  document.querySelector('#startCycle')?.addEventListener('click', startNewCycle);
+  document.querySelector('#openCycleCreate')?.addEventListener('click', showCycleCreateSheet);
   document.querySelectorAll<HTMLElement>('[data-cycle]').forEach(el => {
     el.addEventListener('click', () => continueCycle(el.dataset.cycle || ''));
   });
+  document.querySelectorAll<HTMLElement>('[data-wrong-cycle]').forEach(el => {
+    el.addEventListener('click', () => {
+      state.selectedCycleId = el.dataset.wrongCycle || null;
+      state.view = 'wrongList';
+      render();
+    });
+  });
+  document.querySelectorAll<HTMLElement>('[data-delete-cycle]').forEach(el => {
+    el.addEventListener('click', async () => {
+      if (confirm('이 학습 사이클을 삭제할까요?')) {
+        await deleteOne('cycles', el.dataset.deleteCycle || '');
+        await refresh();
+        render();
+      }
+    });
+  });
 }
 
-async function startNewCycle(): Promise<void> {
-  const wbIds = Array.from(document.querySelectorAll<HTMLInputElement>('input[name="cycleWb"]:checked')).map(x => x.value);
+function showCycleCreateSheet(): void {
+  if (document.querySelector('#cycleCreateSheet')) return;
+  if (!workbooksCache.length) {
+    alert(T.noBooks);
+    return;
+  }
+  const workbookOptions = workbooksCache.map(wb => `
+    <label class="check-row"><input type="checkbox" name="cycleWb" value="${esc(wb.id)}"> <span>${esc(wb.name)} <span class="small">(${wb.cardIds.length})</span></span></label>
+  `).join('');
+  const sheet = document.createElement('div');
+  sheet.className = 'modal-backdrop';
+  sheet.id = 'cycleCreateSheet';
+  sheet.innerHTML = `
+    <div class="modal">
+      <h2>${T.newCycle}</h2>
+      <label>${T.cycleName}<input id="cycleName" type="text" placeholder="예: 미적분 랜덤 1회독"></label>
+      <div class="checkbox-list" style="margin-top:12px">${workbookOptions}</div>
+      <div class="row" style="margin-top:12px">
+        <label>${T.order}<select id="cycleOrder"><option value="seq">${T.sequential}</option><option value="rand">${T.random}</option></select></label>
+        <label>${T.problemCount}<input id="cycleLimit" type="number" min="0" placeholder="전체"></label>
+      </div>
+      <p class="small" id="cycleCountPreview" style="margin-top:10px">선택된 문항 0개</p>
+      <div class="row" style="margin-top:12px">
+        <button id="startCycle">${T.start}</button>
+        <button class="secondary" id="closeCycleCreate">취소</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(sheet);
+  const updatePreview = () => {
+    const wbIds = Array.from(sheet.querySelectorAll<HTMLInputElement>('input[name="cycleWb"]:checked')).map(x => x.value);
+    const sourceIds = new Set<string>();
+    for (const wbId of wbIds) workbookById(wbId)?.cardIds.forEach(id => sourceIds.add(id));
+    const preview = sheet.querySelector('#cycleCountPreview');
+    if (preview) preview.textContent = `선택된 문항 ${sourceIds.size}개`;
+  };
+  sheet.querySelectorAll('input[name="cycleWb"]').forEach(x => x.addEventListener('change', updatePreview));
+  sheet.querySelector('#closeCycleCreate')?.addEventListener('click', () => sheet.remove());
+  sheet.querySelector('#startCycle')?.addEventListener('click', async () => {
+    await startNewCycleFromSheet(sheet);
+  });
+}
+
+async function startNewCycleFromSheet(sheet: HTMLElement): Promise<void> {
+  const wbIds = Array.from(sheet.querySelectorAll<HTMLInputElement>('input[name="cycleWb"]:checked')).map(x => x.value);
   if (!wbIds.length) {
     alert(T.selectBook);
     return;
   }
-  const filterRaw = Array.from(document.querySelectorAll<HTMLInputElement>('input[name="ratingFilter"]:checked')).map(x => Number(x.value));
-  const useFilter = filterRaw.length > 0 && !filterRaw.includes(0);
-  const order = (document.querySelector('#cycleOrder') as HTMLSelectElement).value;
+  const order = (sheet.querySelector('#cycleOrder') as HTMLSelectElement).value as 'seq' | 'rand';
+  const limit = Math.max(0, Number((sheet.querySelector('#cycleLimit') as HTMLInputElement).value || 0));
+  const workbookNames = wbIds.map(id => workbookById(id)?.name || '').filter(Boolean);
   const sourceIds = new Set<string>();
-  for (const wbId of wbIds) {
-    const wb = workbookById(wbId);
-    wb?.cardIds.forEach(id => sourceIds.add(id));
-  }
-  let ids = cardsCache.filter(c => sourceIds.has(c.id) && (!useFilter || filterRaw.includes(c.rating))).sort((a, b) => a.number - b.number).map(c => c.id);
+  for (const wbId of wbIds) workbookById(wbId)?.cardIds.forEach(id => sourceIds.add(id));
+  let ids = cardsCache.filter(c => sourceIds.has(c.id)).sort((a, b) => a.number - b.number).map(c => c.id);
   if (order === 'rand') ids = shuffle(ids);
+  if (limit > 0) ids = ids.slice(0, limit);
   if (!ids.length) {
-    alert('No cards matched.');
+    alert('선택된 문항이 없습니다.');
     return;
   }
+  const nameRaw = (sheet.querySelector('#cycleName') as HTMLInputElement).value.trim();
   const cycle: Cycle = {
     id: uid('cycle'),
-    name: `${new Date().toLocaleString()} (${ids.length})`,
+    name: nameRaw || '미적',
     createdAt: Date.now(),
     queue: ids,
     totalStart: ids.length,
     correct: 0,
     wrong: 0,
-    done: false
+    done: false,
+    order,
+    workbookNames,
+    wrongIds: [],
+    history: []
   };
   await putOne('cycles', cycle);
+  sheet.remove();
   await refresh();
-  continueCycle(cycle.id);
+  render();
 }
 
 function shuffle<TValue>(arr: TValue[]): TValue[] {
@@ -613,7 +822,10 @@ function shuffle<TValue>(arr: TValue[]): TValue[] {
 
 async function continueCycle(cycleId: string): Promise<void> {
   const cycle = await getOne<Cycle>('cycles', cycleId);
-  if (!cycle || cycle.done || cycle.queue.length === 0) return;
+  if (!cycle) return;
+  normalizeCycle(cycle);
+  if (cycle.done || cycle.queue.length === 0) return;
+  await putOne('cycles', cycle);
   startSolving(cycle.queue[0], cycle.id);
 }
 
@@ -621,10 +833,47 @@ function startSolving(cardId: string, cycleId: string | null): void {
   state.view = 'solve';
   state.selectedCardId = cardId;
   state.activeCycleId = cycleId;
+  state.selectedCycleId = cycleId;
   state.revealed = false;
+  state.pendingAnswer = cycleId ? null : (cardById(cardId)?.lastResult || null);
   state.elapsedMs = 0;
   state.timerStart = performance.now();
   render();
+}
+
+function renderWrongList(): void {
+  const cycle = cycleById(state.selectedCycleId);
+  if (!cycle) {
+    state.view = 'cycles';
+    render();
+    return;
+  }
+  normalizeCycle(cycle);
+  const wrongIds = cycle.wrongIds || [];
+  const tiles = wrongIds.map(id => {
+    const c = cardById(id);
+    if (!c) return '';
+    return `<button class="card-tile" data-card="${esc(c.id)}"><strong>#${c.number}</strong><span class="small">오답 문항</span></button>`;
+  }).join('');
+  const content = `
+    <section class="card">
+      <div class="row tight"><h2>${esc(cycle.name)} ${T.wrongCards}</h2><span class="badge">${wrongIds.length}</span></div>
+      <p class="small">이 사이클에서 한 번이라도 틀린 문항입니다.</p>
+    </section>
+    <section class="card"><div class="grid cards-grid">${tiles || `<p class="small">아직 오답 문항이 없습니다.</p>`}</div></section>
+  `;
+  renderShell(content, T.wrongCards, 'none');
+  document.querySelector('#topBackBtn')?.addEventListener('click', () => void handleBackIntent());
+  document.querySelectorAll<HTMLElement>('[data-card]').forEach(el => {
+    el.addEventListener('click', () => {
+      const id = el.dataset.card || null;
+      const c = cardById(id);
+      if (c) state.selectedWorkbookId = c.workbookId;
+      state.selectedCardId = id;
+      state.view = 'card';
+      render();
+    });
+  });
 }
 
 function renderSolve(): void {
@@ -635,14 +884,15 @@ function renderSolve(): void {
     return;
   }
   const cycle = cycleById(state.activeCycleId);
-  const subtitle = cycle ? `${T.cycles} ${cycle.totalStart - cycle.queue.length + 1}/${cycle.totalStart}` : `#${card.number}`;
-  const stars = [1,2,3,4,5].map(n => `<button data-star="${n}">${n <= card.rating ? '★' : '☆'}</button>`).join('');
+  const p = cycle ? cycleProgress(normalizeCycle(cycle)) : null;
+  const subtitle = cycle ? `${cycle.name} · ${p?.done}/${p?.total}` : `#${card.number}`;
+  const status = state.pendingAnswer || card.lastResult || null;
   const content = `
     <section class="solve-toolbar">
       <div class="row tight">
-        <button class="secondary" id="closeSolve">${T.back}</button>
         <span class="badge">#${card.number}</span>
         <span class="badge" id="timerBadge">${T.elapsed} ${msToText(state.revealed ? state.elapsedMs : performance.now() - state.timerStart)}</span>
+        ${status ? `<span class="badge result-badge ${status}">${status === 'correct' ? '정답' : '오답'}</span>` : `<span class="badge">미선택</span>`}
       </div>
     </section>
     <section class="solve-body ${state.revealed ? 'revealed' : ''}">
@@ -655,30 +905,24 @@ function renderSolve(): void {
         ${card.solutionImage ? `<img class="solve-img" src="${card.solutionImage}" />` : `<p>No solution image.</p>`}
       </div>
     </section>
+    <section class="card drawing-card">
+      <h3>${T.drawing}</h3>
+      <div class="canvas-wrap"><canvas id="drawCanvas"></canvas></div>
+      <button class="secondary" style="margin-top:10px" id="clearDrawing">${T.clearDrawing}</button>
+    </section>
     ${state.revealed ? `
       <section class="card">
-        <h3>${T.rating}</h3>
-        <div class="stars">${stars}</div>
-        <h3>${T.note}</h3>
-        <textarea id="noteInput">${esc(card.note)}</textarea>
-        <h3>${T.drawing}</h3>
-        <div class="canvas-wrap"><canvas id="drawCanvas"></canvas></div>
-        <button class="secondary" style="margin-top:10px" id="clearDrawing">${T.clearDrawing}</button>
-        <div class="row" style="margin-top:12px">
-          <button class="ok" id="markCorrect">${T.correct}</button>
-          <button class="danger" id="markWrong">${T.wrong}</button>
+        <div class="result-buttons">
+          <button class="ok ${status === 'correct' ? 'selected' : ''}" id="markCorrect">${T.correct}</button>
+          <button class="danger ${status === 'wrong' ? 'selected' : ''}" id="markWrong">${T.wrong}</button>
         </div>
+        <p class="small">버튼은 상태만 바꿉니다. 다음 문항은 아래 ${T.nextProblem} 버튼으로 이동합니다.</p>
       </section>
-    ` : `
-      <section class="card"><button id="revealBtn">${T.reveal}</button></section>
-    `}
+    ` : ``}
   `;
   renderShell(content, subtitle);
-  document.querySelector('#closeSolve')?.addEventListener('click', () => {
-    state.view = state.activeCycleId ? 'cycles' : 'card';
-    state.revealed = false;
-    render();
-  });
+  setupDrawingCanvas(card);
+  document.querySelector('#clearDrawing')?.addEventListener('click', () => clearCanvas());
   if (!state.revealed) {
     const interval = window.setInterval(() => {
       if (state.view !== 'solve' || state.revealed) {
@@ -688,74 +932,71 @@ function renderSolve(): void {
       const badge = document.querySelector('#timerBadge');
       if (badge) badge.textContent = `${T.elapsed} ${msToText(performance.now() - state.timerStart)}`;
     }, 500);
-    document.querySelector('#revealBtn')?.addEventListener('click', () => {
-      state.elapsedMs = performance.now() - state.timerStart;
-      state.revealed = true;
-      render();
-    });
   } else {
-    setupDrawingCanvas(card);
-    document.querySelectorAll<HTMLElement>('[data-star]').forEach(el => {
-      el.addEventListener('click', async () => {
-        const fresh = await getOne<Card>('cards', card.id);
-        if (!fresh) return;
-        fresh.rating = Number(el.dataset.star);
-        await putOne('cards', fresh);
-        await refresh();
-        render();
-      });
-    });
-    document.querySelector('#clearDrawing')?.addEventListener('click', () => clearCanvas());
-    document.querySelector('#markCorrect')?.addEventListener('click', () => finishAnswer(true));
-    document.querySelector('#markWrong')?.addEventListener('click', () => finishAnswer(false));
+    document.querySelector('#markCorrect')?.addEventListener('click', () => void markResult('correct'));
+    document.querySelector('#markWrong')?.addEventListener('click', () => void markResult('wrong'));
   }
-}
-
-async function finishAnswer(correct: boolean): Promise<void> {
-  const card = await getOne<Card>('cards', state.selectedCardId || '');
-  if (!card) return;
-  card.note = (document.querySelector('#noteInput') as HTMLTextAreaElement | null)?.value ?? card.note;
-  card.drawingImage = getCanvasDataUrl() || card.drawingImage;
-  card.attempts += 1;
-  card.lastMs = state.elapsedMs;
-  await putOne('cards', card);
-
-  if (state.activeCycleId) {
-    const cycle = await getOne<Cycle>('cycles', state.activeCycleId);
-    if (cycle) {
-      const current = cycle.queue.shift();
-      if (correct) cycle.correct += 1;
-      else {
-        cycle.wrong += 1;
-        if (current) cycle.queue.push(current);
-      }
-      if (cycle.queue.length === 0) cycle.done = true;
-      await putOne('cycles', cycle);
-      await refresh();
-      if (cycle.done) {
-        alert(T.done);
-        state.view = 'cycles';
-        state.selectedCardId = null;
-        state.activeCycleId = null;
-        state.revealed = false;
-        render();
-        return;
-      }
-      startSolving(cycle.queue[0], cycle.id);
-      return;
-    }
-  }
-  await refresh();
-  state.view = 'card';
-  state.revealed = false;
-  render();
 }
 
 function render(): void {
   if (state.view === 'books') renderBooks();
   else if (state.view === 'cycles') renderCycles();
   else if (state.view === 'card') renderCardDetail();
+  else if (state.view === 'wrongList') renderWrongList();
   else renderSolve();
+}
+
+async function goBackInApp(): Promise<boolean> {
+  const modal = document.querySelector('.modal-backdrop');
+  if (modal) {
+    modal.remove();
+    return true;
+  }
+  if (state.view === 'solve') {
+    await saveVisibleSolveFeedback();
+    state.view = state.activeCycleId ? 'cycles' : 'card';
+    state.activeCycleId = null;
+    state.pendingAnswer = null;
+    state.revealed = false;
+    render();
+    return true;
+  }
+  if (state.view === 'card') {
+    state.view = 'books';
+    state.selectedCardId = null;
+    render();
+    return true;
+  }
+  if (state.view === 'wrongList') {
+    state.view = 'cycles';
+    state.selectedCycleId = null;
+    render();
+    return true;
+  }
+  return false;
+}
+
+async function handleBackIntent(): Promise<void> {
+  const handled = await goBackInApp();
+  if (handled) return;
+  if (confirm(T.exitAsk)) {
+    try { await CapacitorApp.exitApp(); }
+    catch { /* web preview: do nothing */ }
+  }
+}
+
+function registerBackHandlers(): void {
+  try {
+    CapacitorApp.addListener('backButton', () => { void handleBackIntent(); });
+  } catch { /* not running inside Capacitor */ }
+  try {
+    history.replaceState({ mathCycle: true }, '', location.href);
+    history.pushState({ mathCycle: true }, '', location.href);
+    window.addEventListener('popstate', () => {
+      void handleBackIntent();
+      history.pushState({ mathCycle: true }, '', location.href);
+    });
+  } catch { /* ignore */ }
 }
 
 function imageFileToDataUrl(file: File): Promise<string> {
@@ -850,7 +1091,7 @@ type LineLite = {
 };
 
 type AnchorType = 'question' | 'solution';
-type AnchorStyle = 'question-dot' | 'corner' | 'paren' | 'square';
+type AnchorStyle = 'question-dot' | 'corner' | 'paren' | 'square' | 'prefix-empty';
 
 type Anchor = {
   type: AnchorType;
@@ -919,8 +1160,6 @@ async function handlePdfImport(file: File): Promise<void> {
         number: parsed.number,
         questionImage: parsed.questionImage,
         solutionImage: parsed.solutionImage,
-        rating: 0,
-        note: '',
         drawingImage: '',
         attempts: 0,
         lastMs: 0
@@ -1057,7 +1296,7 @@ const GUIDE_CONTEXT_RE = /수업시간|초집중|당일복습|누적복습|진�
 const QUESTION_CONTEXT_RE = /값은|값을|구하|고르|옳은|옳지|틀린|다음\s*중|모두|만족|해를|근을|기울기|접선|미분|도함수|극한|연속|불연속|정의역|치역|좌표|개수|넓이|함수|방정식|수열|곡선|실수|상수|계수|간단히|같은\s*것|가장|나머지|평균\s*변화율/i;
 const MATH_CONTEXT_RE = /lim|sin|cos|tan|cot|sec|csc|ln|log|arc|sinh|cosh|tanh|sqrt|함수|방정식|극한|미분|도함수|곡선|수열|접선|[=+\-×÷≤≥<>→∞π∫]|[\uE000-\uF8FF]/i;
 const CHOICE_MARK_RE = /[①②③④⑤⑥⑦⑧⑨ⓐⓑⓒⓓⓔⓕ➀➁➂➃➄]/g;
-const INLINE_ANSWER_MARK_RE = /【\s*\d{1,4}\s*】/;
+const INLINE_ANSWER_MARK_RE = /(?:【\s*\d{1,4}\s*】|\d{1,4}\s*【\s*】)/;
 
 function nearbyBlockText(page: PageInfo, line: LineLite, yWindow = 170, maxLines = 9): string {
   return normalizeText(page.lines
@@ -1129,6 +1368,7 @@ function detectSolutionAnchor(page: PageInfo, line: LineLite): Anchor | null {
   const text = normalizeText(line.text);
   const patterns: Array<{ style: AnchorStyle; re: RegExp; weight: number }> = [
     { style: 'corner', re: /^【\s*(\d{1,4})\s*】/, weight: 70 },
+    { style: 'prefix-empty', re: /^(\d{1,4})\s*【\s*】\s*(?:정답|답|sol|풀이|해설)?/i, weight: 68 },
     { style: 'paren', re: /^\(\s*(\d{1,4})\s*\)/, weight: 36 },
     { style: 'square', re: /^\[\s*(\d{1,4})\s*\]/, weight: 34 }
   ];
@@ -1166,6 +1406,62 @@ function detectSolutionAnchor(page: PageInfo, line: LineLite): Anchor | null {
   return null;
 }
 
+function detectSolutionAnchors(page: PageInfo): Anchor[] {
+  const anchors: Anchor[] = [];
+  for (const line of page.lines) {
+    const a = detectSolutionAnchor(page, line);
+    if (a) anchors.push(a);
+  }
+
+  // Some answer PDFs encode the marker as a tiny standalone text item inside a longer visual line.
+  // Add item-level anchors so short solutions like "【5】 ... 【6】 ..." do not get merged incorrectly.
+  for (const item of page.items) {
+    const text = normalizeText(item.str);
+    const m = text.match(/^【\s*(\d{1,4})\s*】$/);
+    if (!m) continue;
+    const number = Number(m[1]);
+    if (!Number.isFinite(number) || number < 1 || number > 9999) continue;
+    const line = page.lines
+      .filter(l => l.col === item.col && Math.abs((l.y + l.h / 2) - (item.y + item.h / 2)) <= Math.max(5, item.h))
+      .sort((a, b) => Math.abs(a.x - item.x) - Math.abs(b.x - item.x))[0];
+    const fakeLine: LineLite = line || {
+      pageNum: page.pageNum,
+      cellIndex: (page.pageNum - 1) * 2 + item.col,
+      col: item.col,
+      text,
+      x: item.x,
+      y: item.y,
+      w: item.w,
+      h: item.h,
+      items: [item]
+    };
+    const gap = gapAbove(fakeLine, page.lines);
+    let score = 70 + scoreLeftIndent(page, fakeLine);
+    if (/정답|답\s*[:;]|sol\)?|풀이|해설/i.test(fakeLine.text)) score += 28;
+    if (gap > 16) score += 10;
+    anchors.push({
+      type: 'solution',
+      style: 'corner',
+      number,
+      pageNum: page.pageNum,
+      cellIndex: (page.pageNum - 1) * 2 + item.col,
+      col: item.col,
+      x: item.x,
+      y: item.y,
+      h: item.h,
+      lineText: fakeLine.text,
+      score
+    });
+  }
+
+  const deduped: Anchor[] = [];
+  for (const a of anchors.sort((x, y) => anchorSort(x, y) || y.score - x.score)) {
+    const duplicate = deduped.some(b => b.number === a.number && b.pageNum === a.pageNum && b.col === a.col && Math.abs(b.y - a.y) < 8 && Math.abs(b.x - a.x) < 80);
+    if (!duplicate) deduped.push(a);
+  }
+  return deduped.sort(anchorSort);
+}
+
 function selectMonotonicAnchors(candidates: Anchor[], maxNumber?: number): Anchor[] {
   const arr = candidates
     .filter(c => c.number >= 1 && (!maxNumber || c.number <= maxNumber))
@@ -1196,7 +1492,7 @@ function selectMonotonicAnchors(candidates: Anchor[], maxNumber?: number): Ancho
 }
 
 function chooseSolutionStyle(candidates: Anchor[], maxNumber?: number): AnchorStyle | null {
-  const styles: AnchorStyle[] = ['corner', 'paren', 'square'];
+  const styles: AnchorStyle[] = ['corner', 'prefix-empty', 'paren', 'square'];
   let bestStyle: AnchorStyle | null = null;
   let bestQuality = -Infinity;
   for (const style of styles) {
@@ -1342,9 +1638,7 @@ async function parsePdfToImages(file: File, log: (msg: string, progress: number)
       .filter((a): a is Anchor => Boolean(a));
     pageInfo.hasQuestionPage = pageInfo.questionCandidates.length > 0;
     if (!pageInfo.hasQuestionPage) {
-      pageInfo.solutionCandidates = pageInfo.lines
-        .map(line => detectSolutionAnchor(pageInfo, line))
-        .filter((a): a is Anchor => Boolean(a));
+      pageInfo.solutionCandidates = detectSolutionAnchors(pageInfo);
     }
     pages.push(pageInfo);
     if (i % 5 === 0 || i === pageCount) log(`scan ${i}/${pageCount}`, 0.02 + 0.30 * (i / pageCount));
@@ -1505,6 +1799,7 @@ async function mergeDataUrls(urls: string[]): Promise<string> {
 
 
 (async function boot() {
+  registerBackHandlers();
   await refresh();
   render();
 })();
