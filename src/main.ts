@@ -42,6 +42,7 @@ type Cycle = {
   order?: 'seq' | 'rand';
   workbookNames?: string[];
   wrongIds?: string[];
+  clearedWrongIds?: string[];
   history?: CycleHistoryEntry[];
 };
 
@@ -408,6 +409,7 @@ function navigationCardsForCard(card: Card): Card[] {
   if (!state.activeCycleId && state.cardContext === 'wrong' && state.selectedCycleId) {
     const wrongCards = wrongCardsForSelectedCycle();
     if (wrongCards.some(c => c.id === card.id)) return wrongCards;
+    return [...wrongCards, card].sort((a, b) => a.number - b.number || a.id.localeCompare(b.id));
   }
   return workbookCardsForCard(card);
 }
@@ -424,6 +426,7 @@ function normalizeCycle(cycle: Cycle): Cycle {
   cycle.order = cycle.order || 'seq';
   cycle.workbookNames = cycle.workbookNames || [];
   cycle.wrongIds = cycle.wrongIds || [];
+  cycle.clearedWrongIds = cycle.clearedWrongIds || [];
   cycle.history = cycle.history || [];
   cycle.correct = Number(cycle.correct || 0);
   cycle.wrong = Number(cycle.wrong || 0);
@@ -435,8 +438,35 @@ function normalizeCycle(cycle: Cycle): Cycle {
 
 function recomputeWrongIds(cycle: Cycle): void {
   const wrong = new Set<string>();
-  for (const h of cycle.history || []) if (h.answer === 'wrong') wrong.add(h.cardId);
+  const cleared = new Set(cycle.clearedWrongIds || []);
+  for (const h of cycle.history || []) {
+    if (h.answer === 'wrong' && !cleared.has(h.cardId)) wrong.add(h.cardId);
+  }
   cycle.wrongIds = Array.from(wrong);
+}
+
+function isCurrentCardStillWrongListed(): boolean {
+  if (!state.selectedCardId || !state.selectedCycleId) return false;
+  const cycle = cycleById(state.selectedCycleId);
+  if (!cycle) return false;
+  normalizeCycle(cycle);
+  return new Set(cycle.wrongIds || []).has(state.selectedCardId);
+}
+
+async function removeCurrentFromWrongList(): Promise<void> {
+  const cardId = state.selectedCardId;
+  const cycleId = state.selectedCycleId;
+  if (!cardId || !cycleId) return;
+  await saveVisibleSolveFeedback();
+  const cycle = await getOne<Cycle>('cycles', cycleId);
+  if (!cycle) return;
+  normalizeCycle(cycle);
+  if (!cycle.clearedWrongIds!.includes(cardId)) cycle.clearedWrongIds!.push(cardId);
+  if ((cycle.history || []).length) recomputeWrongIds(cycle);
+  else cycle.wrongIds = (cycle.wrongIds || []).filter(id => id !== cardId);
+  await putOne('cycles', cycle);
+  await refresh();
+  render();
 }
 
 async function saveVisibleSolveFeedback(): Promise<void> {
@@ -560,6 +590,7 @@ async function commitCycleAnswer(answer: AnswerState): Promise<void> {
   if (answer === 'correct') cycle.correct += 1;
   else {
     cycle.wrong += 1;
+    cycle.clearedWrongIds = (cycle.clearedWrongIds || []).filter(id => id !== actual);
     cycle.queue.push(actual);
   }
   recomputeWrongIds(cycle);
@@ -828,6 +859,7 @@ async function startNewCycleFromSheet(sheet: HTMLElement): Promise<void> {
     order,
     workbookNames,
     wrongIds: [],
+    clearedWrongIds: [],
     history: []
   };
   await putOne('cycles', cycle);
@@ -900,10 +932,13 @@ function renderWrongList(): void {
       if (c) state.selectedWorkbookId = c.workbookId;
       state.selectedCardId = id;
       state.cardContext = 'wrong';
-      state.view = 'card';
-      render();
+      startSolving(id || '', null, 'wrong');
     });
   });
+}
+
+function isWrongReviewMode(): boolean {
+  return state.view === 'solve' && !state.activeCycleId && state.cardContext === 'wrong' && Boolean(state.selectedCycleId);
 }
 
 function renderSolve(): void {
@@ -915,14 +950,16 @@ function renderSolve(): void {
   }
   const cycle = cycleById(state.activeCycleId);
   const p = cycle ? cycleProgress(normalizeCycle(cycle)) : null;
-  const subtitle = cycle ? `${cycle.name} · ${p?.done}/${p?.total}` : `#${card.number}`;
-  const status = state.pendingAnswer || card.lastResult || null;
+  const wrongReview = isWrongReviewMode();
+  const wrongListed = wrongReview ? isCurrentCardStillWrongListed() : false;
+  const subtitle = wrongReview ? `${T.wrongCards} · #${card.number}` : (cycle ? `${cycle.name} · ${p?.done}/${p?.total}` : `#${card.number}`);
+  const status = wrongReview ? null : (state.pendingAnswer || card.lastResult || null);
   const content = `
     <section class="solve-toolbar">
       <div class="row tight">
         <span class="badge">#${card.number}</span>
         <span class="badge" id="timerBadge">${T.elapsed} ${msToText(state.revealed ? state.elapsedMs : performance.now() - state.timerStart)}</span>
-        ${status ? `<span class="badge result-badge ${status}">${status === 'correct' ? '정답' : '오답'}</span>` : `<span class="badge">미선택</span>`}
+        ${wrongReview ? `<span class="badge">오답 복습</span>` : (status ? `<span class="badge result-badge ${status}">${status === 'correct' ? '정답' : '오답'}</span>` : `<span class="badge">미선택</span>`)}
       </div>
     </section>
     <section class="solve-body ${state.revealed ? 'revealed' : ''}">
@@ -940,13 +977,19 @@ function renderSolve(): void {
       <div class="canvas-wrap"><canvas id="drawCanvas"></canvas></div>
       <button class="secondary" style="margin-top:10px" id="clearDrawing">${T.clearDrawing}</button>
     </section>
-    ${state.revealed ? `
+    ${state.revealed && !wrongReview ? `
       <section class="card">
         <div class="result-buttons">
           <button class="ok ${status === 'correct' ? 'selected' : ''}" id="markCorrect">${T.correct}</button>
           <button class="danger ${status === 'wrong' ? 'selected' : ''}" id="markWrong">${T.wrong}</button>
         </div>
         <p class="small">버튼은 상태만 바꿉니다. 다음 문항은 아래 ${T.nextProblem} 버튼으로 이동합니다.</p>
+      </section>
+    ` : ``}
+    ${state.revealed && wrongReview ? `
+      <section class="card">
+        <button class="secondary" id="removeWrongCard" ${wrongListed ? '' : 'disabled'}>${wrongListed ? '틀린 문항에서 제거' : '틀린 문항에서 제거됨'}</button>
+        <p class="small" style="margin-top:10px">이 버튼은 선택사항입니다. 누르면 현재 사이클의 오답 문항 목록에서만 빠지고, 누르지 않아도 ${T.nextProblem} 버튼으로 계속 이동할 수 있습니다.</p>
       </section>
     ` : ``}
   `;
@@ -962,6 +1005,8 @@ function renderSolve(): void {
       const badge = document.querySelector('#timerBadge');
       if (badge) badge.textContent = `${T.elapsed} ${msToText(performance.now() - state.timerStart)}`;
     }, 500);
+  } else if (wrongReview) {
+    document.querySelector('#removeWrongCard')?.addEventListener('click', () => void removeCurrentFromWrongList());
   } else {
     document.querySelector('#markCorrect')?.addEventListener('click', () => void markResult('correct'));
     document.querySelector('#markWrong')?.addEventListener('click', () => void markResult('wrong'));
