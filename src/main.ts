@@ -7,6 +7,7 @@ import pdfWorker from 'pdfjs-dist/build/pdf.worker.mjs?url';
 
 type StoreName = 'workbooks' | 'cards' | 'cycles';
 type AnswerState = 'correct' | 'wrong';
+type CardContext = 'workbook' | 'wrong';
 
 type Workbook = {
   id: string;
@@ -53,6 +54,7 @@ type AppState = {
   activeCycleId: string | null;
   selectedCycleId: string | null;
   pendingAnswer: AnswerState | null;
+  cardContext: CardContext;
   revealed: boolean;
   timerStart: number;
   elapsedMs: number;
@@ -76,6 +78,7 @@ const state: AppState = {
   activeCycleId: null,
   selectedCycleId: null,
   pendingAnswer: null,
+  cardContext: 'workbook',
   revealed: false,
   timerStart: 0,
   elapsedMs: 0,
@@ -309,6 +312,7 @@ function attachMainNav(): void {
     state.selectedCardId = null;
     state.revealed = false;
     state.pendingAnswer = null;
+    state.cardContext = 'workbook';
     render();
   });
   document.querySelector('#navCycles')?.addEventListener('click', () => {
@@ -317,15 +321,19 @@ function attachMainNav(): void {
     state.activeCycleId = null;
     state.revealed = false;
     state.pendingAnswer = null;
+    state.cardContext = 'workbook';
     render();
   });
   document.querySelector('#headerImport')?.addEventListener('click', () => {
     state.view = 'books';
+    state.selectedCycleId = null;
+    state.cardContext = 'workbook';
     render();
     window.setTimeout(() => (document.querySelector('#pdfInput') as HTMLInputElement | null)?.click(), 50);
   });
   document.querySelector('#headerNewCycle')?.addEventListener('click', () => {
     state.view = 'cycles';
+    state.cardContext = 'workbook';
     render();
     window.setTimeout(() => showCycleCreateSheet(), 50);
   });
@@ -388,8 +396,24 @@ function workbookCardsForCard(card: Card): Card[] {
   return cardsCache.filter(c => ids.has(c.id)).sort((a, b) => a.number - b.number);
 }
 
+function wrongCardsForSelectedCycle(): Card[] {
+  const cycle = cycleById(state.selectedCycleId);
+  if (!cycle) return [];
+  normalizeCycle(cycle);
+  const ids = new Set(cycle.wrongIds || []);
+  return cardsCache.filter(c => ids.has(c.id)).sort((a, b) => a.number - b.number || a.id.localeCompare(b.id));
+}
+
+function navigationCardsForCard(card: Card): Card[] {
+  if (!state.activeCycleId && state.cardContext === 'wrong' && state.selectedCycleId) {
+    const wrongCards = wrongCardsForSelectedCycle();
+    if (wrongCards.some(c => c.id === card.id)) return wrongCards;
+  }
+  return workbookCardsForCard(card);
+}
+
 function adjacentCardFor(card: Card, delta: -1 | 1): Card | undefined {
-  const cards = workbookCardsForCard(card);
+  const cards = navigationCardsForCard(card);
   const idx = cards.findIndex(c => c.id === card.id);
   if (idx < 0) return undefined;
   return cards[idx + delta];
@@ -440,7 +464,7 @@ async function navigateAdjacent(delta: -1 | 1): Promise<void> {
   const next = adjacentCardFor(current, delta);
   if (!next) return;
   await saveVisibleSolveFeedback();
-  state.selectedWorkbookId = next.workbookId;
+  if (state.cardContext !== 'wrong') state.selectedWorkbookId = next.workbookId;
   state.selectedCardId = next.id;
   state.pendingAnswer = next.lastResult || null;
   if (state.view === 'solve') {
@@ -552,7 +576,7 @@ async function commitCycleAnswer(answer: AnswerState): Promise<void> {
     render();
     return;
   }
-  startSolving(cycle.queue[0], cycle.id);
+  startSolving(cycle.queue[0], cycle.id, 'workbook');
 }
 
 function renderBooks(): void {
@@ -577,10 +601,10 @@ function renderBooks(): void {
       </div>
       <label class="primary-file"><input type="file" accept="application/pdf,.pdf" id="pdfInput" ${state.parsing ? 'disabled' : ''}>${T.importPdf}</label>
     </section>
-    ${state.parsing || state.parseLog ? `
+    ${state.parsing ? `
       <section class="card">
-        <div class="progress-wrap"><div class="progress-bar" style="width:${Math.round(state.parseProgress * 100)}%"></div></div>
-        <div style="margin-top:10px" class="logbox">${esc(state.parseLog)}</div>
+        <div class="row tight"><strong>${T.parsing}</strong><span class="badge">${Math.round(state.parseProgress * 100)}%</span></div>
+        <div class="progress-wrap" style="margin-top:12px"><div class="progress-bar" style="width:${Math.round(state.parseProgress * 100)}%"></div></div>
       </section>
     ` : ''}
     <section class="card">
@@ -620,6 +644,7 @@ function renderBooks(): void {
   document.querySelectorAll<HTMLElement>('[data-card]').forEach(el => {
     el.addEventListener('click', () => {
       state.selectedCardId = el.dataset.card || null;
+      state.cardContext = 'workbook';
       state.view = 'card';
       render();
     });
@@ -651,7 +676,7 @@ function renderCardDetail(): void {
     </section>
   `;
   renderShell(content, `#${card.number}`);
-  document.querySelector('#solveCard')?.addEventListener('click', () => startSolving(card.id, null));
+  document.querySelector('#solveCard')?.addEventListener('click', () => startSolving(card.id, null, state.cardContext));
   document.querySelector('#replaceQBtn')?.addEventListener('click', () => (document.querySelector('#replaceQ') as HTMLInputElement).click());
   document.querySelector('#replaceSBtn')?.addEventListener('click', () => (document.querySelector('#replaceS') as HTMLInputElement).click());
   document.querySelector('#replaceQ')?.addEventListener('change', async (e) => replaceCardImage(card.id, 'questionImage', (e.target as HTMLInputElement).files?.[0]));
@@ -826,14 +851,20 @@ async function continueCycle(cycleId: string): Promise<void> {
   normalizeCycle(cycle);
   if (cycle.done || cycle.queue.length === 0) return;
   await putOne('cycles', cycle);
-  startSolving(cycle.queue[0], cycle.id);
+  startSolving(cycle.queue[0], cycle.id, 'workbook');
 }
 
-function startSolving(cardId: string, cycleId: string | null): void {
+function startSolving(cardId: string, cycleId: string | null, context: CardContext = state.cardContext): void {
   state.view = 'solve';
   state.selectedCardId = cardId;
   state.activeCycleId = cycleId;
-  state.selectedCycleId = cycleId;
+  if (cycleId) {
+    state.selectedCycleId = cycleId;
+    state.cardContext = 'workbook';
+  } else {
+    state.cardContext = context;
+    if (context !== 'wrong') state.selectedCycleId = null;
+  }
   state.revealed = false;
   state.pendingAnswer = cycleId ? null : (cardById(cardId)?.lastResult || null);
   state.elapsedMs = 0;
@@ -849,15 +880,13 @@ function renderWrongList(): void {
     return;
   }
   normalizeCycle(cycle);
-  const wrongIds = cycle.wrongIds || [];
-  const tiles = wrongIds.map(id => {
-    const c = cardById(id);
-    if (!c) return '';
-    return `<button class="card-tile" data-card="${esc(c.id)}"><strong>#${c.number}</strong><span class="small">오답 문항</span></button>`;
-  }).join('');
+  const wrongCards = wrongCardsForSelectedCycle();
+  const tiles = wrongCards.map(c => `
+    <button class="card-tile" data-card="${esc(c.id)}"><strong>#${c.number}</strong><span class="small">오답 문항</span></button>
+  `).join('');
   const content = `
     <section class="card">
-      <div class="row tight"><h2>${esc(cycle.name)} ${T.wrongCards}</h2><span class="badge">${wrongIds.length}</span></div>
+      <div class="row tight"><h2>${esc(cycle.name)} ${T.wrongCards}</h2><span class="badge">${wrongCards.length}</span></div>
       <p class="small">이 사이클에서 한 번이라도 틀린 문항입니다.</p>
     </section>
     <section class="card"><div class="grid cards-grid">${tiles || `<p class="small">아직 오답 문항이 없습니다.</p>`}</div></section>
@@ -870,6 +899,7 @@ function renderWrongList(): void {
       const c = cardById(id);
       if (c) state.selectedWorkbookId = c.workbookId;
       state.selectedCardId = id;
+      state.cardContext = 'wrong';
       state.view = 'card';
       render();
     });
@@ -954,22 +984,35 @@ async function goBackInApp(): Promise<boolean> {
   }
   if (state.view === 'solve') {
     await saveVisibleSolveFeedback();
-    state.view = state.activeCycleId ? 'cycles' : 'card';
-    state.activeCycleId = null;
+    if (state.activeCycleId) {
+      state.view = 'cycles';
+      state.activeCycleId = null;
+      state.cardContext = 'workbook';
+    } else if (state.cardContext === 'wrong' && state.selectedCycleId) {
+      state.view = 'wrongList';
+    } else {
+      state.view = 'card';
+    }
     state.pendingAnswer = null;
     state.revealed = false;
     render();
     return true;
   }
   if (state.view === 'card') {
-    state.view = 'books';
-    state.selectedCardId = null;
+    if (state.cardContext === 'wrong' && state.selectedCycleId) {
+      state.view = 'wrongList';
+    } else {
+      state.view = 'books';
+      state.selectedCardId = null;
+    }
     render();
     return true;
   }
   if (state.view === 'wrongList') {
     state.view = 'cycles';
+    state.selectedCardId = null;
     state.selectedCycleId = null;
+    state.cardContext = 'workbook';
     render();
     return true;
   }
@@ -1138,11 +1181,12 @@ type ParsedCardImages = {
 async function handlePdfImport(file: File): Promise<void> {
   state.parsing = true;
   state.parseProgress = 0;
-  state.parseLog = `${T.parsing}: ${file.name}\n`;
+  state.parseLog = '';
+  state.parseProgress = 0;
   render();
   try {
     const cards = await parsePdfToImages(file, (msg, progress) => {
-      state.parseLog += `${msg}\n`;
+      state.parseLog = msg;
       state.parseProgress = progress;
       render();
     });
@@ -1170,10 +1214,12 @@ async function handlePdfImport(file: File): Promise<void> {
     await putOne('workbooks', wb);
     await refresh();
     state.selectedWorkbookId = wb.id;
-    state.parseLog += `${T.done}: ${cards.length} cards\n`;
+    state.parseLog = '';
+    alert(`${T.done}: ${cards.length} cards`);
   } catch (err) {
     console.error(err);
-    state.parseLog += `ERROR: ${(err as Error).message}\n`;
+    state.parseLog = `ERROR: ${(err as Error).message}`;
+    alert(state.parseLog);
   } finally {
     state.parsing = false;
     state.parseProgress = 1;
@@ -1449,6 +1495,92 @@ function detectSolutionAnchors(page: PageInfo): Anchor[] {
       x: item.x,
       y: item.y,
       h: item.h,
+      lineText: fakeLine.text,
+      score
+    });
+  }
+
+
+  // Some PDFs, especially the linear algebra Sparring file, split the marker as
+  // a standalone number line followed by "【】정답" on the next visual line.
+  // Treat that pair as one solution anchor so early single-digit answers are not lost.
+  const sortedLines = page.lines.sort(lineSort);
+  for (const line of sortedLines) {
+    const numOnly = normalizeText(line.text).match(/^(\d{1,4})$/);
+    if (!numOnly) continue;
+    const number = Number(numOnly[1]);
+    if (!Number.isFinite(number) || number < 1 || number > 9999) continue;
+    const near = sortedLines
+      .filter(l => l.col === line.col && l.y >= line.y - Math.max(2, line.h * 0.4) && l.y <= line.y + Math.max(42, line.h * 4) && l !== line)
+      .sort((a, b) => a.y - b.y || a.x - b.x)
+      .slice(0, 3);
+    const markerText = normalizeText(near.map(l => l.text).join(' '));
+    if (!/^(?:【\s*】|\[\s*\]|\(\s*\))\s*(?:정답|답|sol\)?|풀이|해설)/i.test(markerText)) continue;
+    const score = 96 + scoreLeftIndent(page, line) + (gapAbove(line, page.lines) > 16 ? 10 : 0);
+    anchors.push({
+      type: 'solution',
+      style: 'prefix-empty',
+      number,
+      pageNum: page.pageNum,
+      cellIndex: line.cellIndex,
+      col: line.col,
+      x: line.x,
+      y: line.y,
+      h: Math.max(line.h, near[0]?.h || line.h),
+      lineText: normalizeText(`${line.text} ${markerText}`),
+      score
+    });
+  }
+
+  // Some answer pages, especially the linear algebra PDF, encode the marker as
+  // a separate number item placed inside an empty marker item: "1" + "【】정답".
+  // Detect that pair as the answer anchor for #1, #2, ... so early answers are not missed.
+  for (const marker of page.items) {
+    const markerText = normalizeText(marker.str);
+    if (!/^【\s*】\s*(?:정답|답|sol\)?|풀이|해설)?/i.test(markerText)) continue;
+    const markerCy = marker.y + marker.h / 2;
+    const numberItem = page.items
+      .filter(it => {
+        if (it.col !== marker.col) return false;
+        const t = normalizeText(it.str);
+        if (!/^\d{1,4}$/.test(t)) return false;
+        const cy = it.y + it.h / 2;
+        const sameRow = Math.abs(cy - markerCy) <= Math.max(5, marker.h * 0.85, it.h * 0.85);
+        const insideMarker = it.x >= marker.x - 4 && it.x <= marker.x + marker.w + 8;
+        return sameRow && insideMarker;
+      })
+      .sort((a, b) => Math.abs((a.x + a.w / 2) - (marker.x + marker.w / 2)) - Math.abs((b.x + b.w / 2) - (marker.x + marker.w / 2)))[0];
+    if (!numberItem) continue;
+    const number = Number(normalizeText(numberItem.str));
+    if (!Number.isFinite(number) || number < 1 || number > 9999) continue;
+    const line = page.lines
+      .filter(l => l.col === marker.col && Math.abs((l.y + l.h / 2) - markerCy) <= Math.max(5, marker.h))
+      .sort((a, b) => Math.abs(a.y + a.h / 2 - markerCy) - Math.abs(b.y + b.h / 2 - markerCy))[0];
+    const fakeLine: LineLite = line || {
+      pageNum: page.pageNum,
+      cellIndex: (page.pageNum - 1) * 2 + marker.col,
+      col: marker.col,
+      text: `${number} ${markerText}`,
+      x: Math.min(numberItem.x, marker.x),
+      y: Math.min(numberItem.y, marker.y),
+      w: Math.max(numberItem.x + numberItem.w, marker.x + marker.w) - Math.min(numberItem.x, marker.x),
+      h: Math.max(numberItem.y + numberItem.h, marker.y + marker.h) - Math.min(numberItem.y, marker.y),
+      items: [numberItem, marker]
+    };
+    const gap = gapAbove(fakeLine, page.lines);
+    let score = 88 + scoreLeftIndent(page, fakeLine);
+    if (/정답|답\s*[:;]|sol\)?|풀이|해설/i.test(markerText)) score += 30;
+    if (gap > 16) score += 10;
+    anchors.push({
+      type: 'solution',
+      style: 'prefix-empty',
+      number,
+      pageNum: page.pageNum,
+      cellIndex: (page.pageNum - 1) * 2 + marker.col,
+      col: marker.col,
+      x: Math.min(numberItem.x, marker.x),
+      y: Math.min(numberItem.y, marker.y),
+      h: Math.max(numberItem.h, marker.h),
       lineText: fakeLine.text,
       score
     });
