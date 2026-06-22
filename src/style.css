@@ -150,3 +150,24 @@ textarea { min-height: 90px; resize: vertical; }
 .check-row { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: white; }
 .check-row input { width: auto; min-height: auto; }
 .logbox { white-space: pre-wrap; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; color: #334155; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 14px; padding: 12px; max-height: 240px; overflow: auto; }
+
+.nav-pager button {
+  min-height: 52px;
+  font-size: 16px;
+}
+.nav-pager button:first-child {
+  background: #e5e7eb;
+  color: #111827;
+}
+.nav-pager button:last-child {
+  background: #111827;
+  color: #ffffff;
+}
+.nav-pager button:disabled {
+  opacity: 0.42;
+}
+.result-modal h2 { margin-top: 0; }
+@media (max-width: 420px) {
+  .nav-pager { gap: 8px; padding-left: 10px; padding-right: 10px; }
+  .nav-pager button { padding-left: 8px; padding-right: 8px; }
+}

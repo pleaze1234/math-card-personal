@@ -97,6 +97,11 @@ const T = {
   newCycle: '\uc0c8 \uc0ac\uc774\ud074',
   start: '\uc2dc\uc791',
   continue: '\uc774\uc5b4 \ud480\uae30',
+  prevProblem: '이전 문제',
+  nextProblem: '다음 문제',
+  chooseResult: '이 문제 결과 선택',
+  chooseResultTip: '다음 문제로 넘어가려면 맞음/틀림을 선택하세요.',
+  cancel: '취소',
   order: '\uc21c\uc11c',
   sequential: '\uc21c\uc11c\ub300\ub85c',
   random: '\ub79c\ub364',
@@ -226,7 +231,18 @@ function selectedWorkbookCards(): Card[] {
   return cardsCache.filter(c => ids.has(c.id)).sort((a, b) => a.number - b.number);
 }
 
-function renderShell(content: string, subtitle = ''): void {
+type ShellNavMode = 'main' | 'pager';
+
+type PagerInfo = {
+  prevLabel: string;
+  nextLabel: string;
+  prevDisabled: boolean;
+  nextDisabled: boolean;
+};
+
+function renderShell(content: string, subtitle = '', navMode?: ShellNavMode): void {
+  const mode: ShellNavMode = navMode ?? ((state.view === 'card' || state.view === 'solve') ? 'pager' : 'main');
+  const navHtml = mode === 'pager' ? renderPagerNav() : renderMainNav();
   app.innerHTML = `
     <div class="app-shell">
       <header class="topbar">
@@ -234,12 +250,23 @@ function renderShell(content: string, subtitle = ''): void {
         <p>${esc(subtitle || T.parsingTip)}</p>
       </header>
       <main class="content">${content}</main>
-      <nav class="nav">
-        <button class="${state.view === 'books' || state.view === 'card' || (state.view === 'solve' && !state.activeCycleId) ? 'active' : ''}" id="navBooks">${T.books}</button>
-        <button class="${state.view === 'cycles' || (state.view === 'solve' && state.activeCycleId) ? 'active' : ''}" id="navCycles">${T.cycles}</button>
-      </nav>
+      ${navHtml}
     </div>
   `;
+  if (mode === 'pager') attachPagerNav();
+  else attachMainNav();
+}
+
+function renderMainNav(): string {
+  return `
+    <nav class="nav nav-main">
+      <button class="${state.view === 'books' ? 'active' : ''}" id="navBooks">${T.books}</button>
+      <button class="${state.view === 'cycles' ? 'active' : ''}" id="navCycles">${T.cycles}</button>
+    </nav>
+  `;
+}
+
+function attachMainNav(): void {
   document.querySelector('#navBooks')?.addEventListener('click', () => {
     state.view = 'books';
     state.activeCycleId = null;
@@ -253,6 +280,137 @@ function renderShell(content: string, subtitle = ''): void {
     state.activeCycleId = null;
     state.revealed = false;
     render();
+  });
+}
+
+function renderPagerNav(): string {
+  const info = getPagerInfo();
+  return `
+    <nav class="nav nav-pager">
+      <button class="secondary" id="navPrev" ${info.prevDisabled ? 'disabled' : ''}>${info.prevLabel}</button>
+      <button id="navNext" ${info.nextDisabled ? 'disabled' : ''}>${info.nextLabel}</button>
+    </nav>
+  `;
+}
+
+function getPagerInfo(): PagerInfo {
+  const card = cardById(state.selectedCardId);
+  const isCycleSolve = state.view === 'solve' && Boolean(state.activeCycleId);
+  const prevCard = card ? adjacentCardFor(card, -1) : undefined;
+  const nextCard = card ? adjacentCardFor(card, 1) : undefined;
+
+  if (state.view === 'solve') {
+    return {
+      prevLabel: T.prevProblem,
+      nextLabel: state.revealed ? T.nextProblem : T.reveal,
+      prevDisabled: isCycleSolve || !prevCard,
+      nextDisabled: isCycleSolve ? false : (state.revealed ? !nextCard : false)
+    };
+  }
+
+  return {
+    prevLabel: T.prevProblem,
+    nextLabel: T.nextProblem,
+    prevDisabled: !prevCard,
+    nextDisabled: !nextCard
+  };
+}
+
+function attachPagerNav(): void {
+  document.querySelector('#navPrev')?.addEventListener('click', () => void handlePagerPrev());
+  document.querySelector('#navNext')?.addEventListener('click', () => void handlePagerNext());
+}
+
+function workbookCardsForCard(card: Card): Card[] {
+  const selected = workbookById(state.selectedWorkbookId);
+  const selectedHasCard = selected?.cardIds.includes(card.id);
+  const wb = selectedHasCard ? selected : workbookById(card.workbookId);
+  if (!wb) return [];
+  const ids = new Set(wb.cardIds);
+  return cardsCache.filter(c => ids.has(c.id)).sort((a, b) => a.number - b.number);
+}
+
+function adjacentCardFor(card: Card, delta: -1 | 1): Card | undefined {
+  const cards = workbookCardsForCard(card);
+  const idx = cards.findIndex(c => c.id === card.id);
+  if (idx < 0) return undefined;
+  return cards[idx + delta];
+}
+
+async function saveVisibleSolveFeedback(): Promise<void> {
+  if (state.view !== 'solve' || !state.revealed || !state.selectedCardId) return;
+  const card = await getOne<Card>('cards', state.selectedCardId);
+  if (!card) return;
+  const noteInput = document.querySelector<HTMLTextAreaElement>('#noteInput');
+  if (noteInput) card.note = noteInput.value;
+  const drawing = getCanvasDataUrl();
+  if (drawing) card.drawingImage = drawing;
+  if (state.elapsedMs) card.lastMs = state.elapsedMs;
+  await putOne('cards', card);
+  await refresh();
+}
+
+async function navigateAdjacent(delta: -1 | 1): Promise<void> {
+  const current = cardById(state.selectedCardId);
+  if (!current) return;
+  const next = adjacentCardFor(current, delta);
+  if (!next) return;
+  await saveVisibleSolveFeedback();
+  state.selectedWorkbookId = next.workbookId;
+  state.selectedCardId = next.id;
+  if (state.view === 'solve') {
+    startSolving(next.id, null);
+  } else {
+    render();
+  }
+}
+
+async function handlePagerPrev(): Promise<void> {
+  if (state.view === 'solve' && state.activeCycleId) return;
+  await navigateAdjacent(-1);
+}
+
+async function handlePagerNext(): Promise<void> {
+  if (state.view === 'solve') {
+    if (!state.revealed) {
+      state.elapsedMs = performance.now() - state.timerStart;
+      state.revealed = true;
+      render();
+      return;
+    }
+    if (state.activeCycleId) {
+      showCycleResultSheet();
+      return;
+    }
+  }
+  await navigateAdjacent(1);
+}
+
+function showCycleResultSheet(): void {
+  if (document.querySelector('#cycleResultSheet')) return;
+  const sheet = document.createElement('div');
+  sheet.className = 'modal-backdrop';
+  sheet.id = 'cycleResultSheet';
+  sheet.innerHTML = `
+    <div class="modal result-modal">
+      <h2>${T.chooseResult}</h2>
+      <p class="small">${T.chooseResultTip}</p>
+      <div class="row" style="margin-top:12px">
+        <button class="danger" id="sheetWrong">${T.wrong}</button>
+        <button class="ok" id="sheetCorrect">${T.correct}</button>
+      </div>
+      <button class="secondary" style="margin-top:10px;width:100%" id="sheetCancel">${T.cancel}</button>
+    </div>
+  `;
+  document.body.appendChild(sheet);
+  document.querySelector('#sheetCancel')?.addEventListener('click', () => sheet.remove());
+  document.querySelector('#sheetWrong')?.addEventListener('click', () => {
+    sheet.remove();
+    void finishAnswer(false);
+  });
+  document.querySelector('#sheetCorrect')?.addEventListener('click', () => {
+    sheet.remove();
+    void finishAnswer(true);
   });
 }
 
@@ -894,92 +1052,62 @@ function scoreLeftIndent(page: PageInfo | { width: number; height: number }, lin
   return -25;
 }
 
-function isGuideNumberLine(text: string): boolean {
-  const n = normalizeText(text);
-  if (!/^\d{1,4}\s*\./.test(n)) return false;
-  return /^\d{1,4}\s*\.\s*(구성|사용법|공부법|학습법|공부|사용|활용|안내|주의|유의|목차|차례|구분|범위|정오표|교재|커리큘럼|강의|수업|part\b|chapter\b|section\b)/i.test(n);
-}
+const GUIDE_NUMBERED_HEAD_RE = /^(?:구성|사용법|편입수학|핵심\s*공부법|공부법|학습법|활용법|목차|차례|안내|주의|설명|준비|구조|교재|강의|수업|복습|진도|part\b|파트\b|section\b|chapter\b)/i;
+const GUIDE_CONTEXT_RE = /수업시간|초집중|당일복습|누적복습|진도|part\s*\d*|파트\s*\d*|셀프연습|유형별문제|유형별\s*문제|확인용|점검용|반복|공부법|사용법|구성|설명|안내|목차|차례|교재|강의|수업|응시|숙지/i;
+const QUESTION_CONTEXT_RE = /값은|값을|구하|고르|옳은|옳지|틀린|다음\s*중|모두|만족|해를|근을|기울기|접선|미분|도함수|극한|연속|불연속|정의역|치역|좌표|개수|넓이|함수|방정식|수열|곡선|실수|상수|계수|간단히|같은\s*것|가장|나머지|평균\s*변화율/i;
+const MATH_CONTEXT_RE = /lim|sin|cos|tan|cot|sec|csc|ln|log|arc|sinh|cosh|tanh|sqrt|함수|방정식|극한|미분|도함수|곡선|수열|접선|[=+\-×÷≤≥<>→∞π∫]|[\uE000-\uF8FF]/i;
+const CHOICE_MARK_RE = /[①②③④⑤⑥⑦⑧⑨ⓐⓑⓒⓓⓔⓕ➀➁➂➃➄]/g;
+const INLINE_ANSWER_MARK_RE = /【\s*\d{1,4}\s*】/;
 
-function hasMatchingQuestionMarker(text: string, number: number): boolean {
-  const compact = normalizeText(text).replace(/\s+/g, '');
-  return compact.includes(`【${number}】`) || compact.includes(`[${number}]`);
-}
-
-
-function hasChoiceMarker(text: string): boolean {
-  const n = normalizeText(text);
-  return /[①②③④⑤⑥⑦⑧⑨ⓐⓑⓒⓓⓔ㉠㉡㉢㉣]/.test(n) || /(?:^|\s)(?:ㄱ|ㄴ|ㄷ|ㄹ)\s*[.)]/.test(n);
-}
-
-function hasQuestionPhrase(text: string): boolean {
-  const n = normalizeText(text);
-  return /(값은|구하|고르|찾으|옳|틀린|바르|몇|개수|합은|곱은|해는|근은|좌표|기울기|미분계수|도함수|극한값|극한|연속|불연속|정의역|치역|그래프|접선|방정식|함수|다음 중|만족|간단히|나열|계산|모두)/.test(n) || /[?？]$/.test(n);
-}
-
-function hasMathSignal(text: string): boolean {
-  const n = normalizeText(text);
-  return /(lim|sin|cos|tan|ln|log|sinh|cosh|tanh|arc|sec|csc|cot|sqrt|함수|방정식|수열|곡선|도함수|미분|극한|연속|접선)/i.test(n) || /[=<>≤≥∑∫√′]/.test(n);
-}
-
-function nearbyLines(page: PageInfo, line: LineLite, maxLines = 8): LineLite[] {
-  return page.lines
-    .filter(l => l.col === line.col && l.y >= line.y && l.y - line.y < Math.max(120, line.h * 14))
+function nearbyBlockText(page: PageInfo, line: LineLite, yWindow = 170, maxLines = 9): string {
+  return normalizeText(page.lines
+    .filter(l => l.col === line.col && l.y >= line.y - 2 && l.y <= line.y + yWindow && !isDecorativeLine(l.text))
     .sort((a, b) => a.y - b.y || a.x - b.x)
-    .slice(0, maxLines);
+    .slice(0, maxLines)
+    .map(l => l.text)
+    .join(' '));
 }
 
-function scoreQuestionContext(page: PageInfo, line: LineLite, number: number): number {
-  const windowLines = nearbyLines(page, line, 10);
-  const joined = windowLines.map(l => l.text).join(' ');
-  let score = 0;
-  if (hasMatchingQuestionMarker(line.text, number)) score += 58;
-  else if (hasMatchingQuestionMarker(joined, number)) score += 32;
-  if (hasQuestionPhrase(line.text)) score += 26;
-  else if (hasQuestionPhrase(joined)) score += 14;
-  if (hasChoiceMarker(joined)) score += 28;
-  if (hasMathSignal(line.text)) score += 12;
-  else if (hasMathSignal(joined)) score += 6;
-  if (/^Topic\s*\d/i.test(page.lines[0]?.text || '') || page.lines.some(l => /^Topic\s*\d/i.test(l.text))) score += 6;
-  if (isGuideNumberLine(line.text)) score -= 120;
-  if (/^(part|chapter|topic)\s*[-\d]/i.test(normalizeText(line.text))) score -= 80;
-  if (/^\d{1,4}\s*\.\s*$/.test(normalizeText(line.text))) score -= 20;
-  return score;
+function numberedLineBody(text: string): string {
+  return normalizeText(text.replace(/^\d{1,4}\s*\.\s*/, ''));
 }
 
-function filterQuestionCandidatesForPage(page: PageInfo, raw: Anchor[]): Anchor[] {
-  const scored = raw
-    .map(anchor => {
-      const line = page.lines.find(l => l.pageNum === anchor.pageNum && l.cellIndex === anchor.cellIndex && Math.abs(l.y - anchor.y) < 2 && l.text === anchor.lineText);
-      const contextScore = line ? scoreQuestionContext(page, line, anchor.number) : 0;
-      return { ...anchor, score: anchor.score + contextScore };
-    })
-    .filter(anchor => anchor.score >= 78);
+function questionEvidenceScore(page: PageInfo, line: LineLite): number {
+  const text = normalizeText(line.text);
+  const body = numberedLineBody(text);
+  const block = nearbyBlockText(page, line);
+  const choices = block.match(CHOICE_MARK_RE)?.length ?? 0;
+  let evidence = 0;
 
-  const pageText = page.lines.map(l => l.text).join(' ');
-  const choiceCount = page.lines.filter(l => hasChoiceMarker(l.text)).length;
-  const markerCount = scored.filter(a => hasMatchingQuestionMarker(a.lineText, a.number)).length;
-  const phraseCount = scored.filter(a => hasQuestionPhrase(a.lineText)).length;
-  const guideCount = page.lines.filter(l => isGuideNumberLine(l.text)).length;
-  const topicBonus = /Topic\s*\d/i.test(pageText) ? 12 : 0;
-  const pageScore = scored.length * 16 + markerCount * 24 + phraseCount * 10 + Math.min(4, choiceCount) * 6 + topicBonus - guideCount * 26;
+  if (GUIDE_NUMBERED_HEAD_RE.test(body)) evidence -= 110;
+  if (GUIDE_CONTEXT_RE.test(block) && choices === 0 && !INLINE_ANSWER_MARK_RE.test(block)) evidence -= 45;
+  if (/^\d{1,4}\s*\.\s*[가-힣a-zA-Z\s]{1,24}[:：]?$/.test(text) && !QUESTION_CONTEXT_RE.test(block)) evidence -= 34;
 
-  if (scored.length === 0) return [];
-  if (pageScore < 34 && markerCount === 0) return [];
-  return scored.sort(anchorSort);
+  if (INLINE_ANSWER_MARK_RE.test(block)) evidence += 34;
+  if (QUESTION_CONTEXT_RE.test(block)) evidence += 30;
+  if (MATH_CONTEXT_RE.test(block)) evidence += 18;
+  if (choices >= 2) evidence += Math.min(34, choices * 7);
+  if (/\?/.test(block)) evidence += 14;
+  if (/\[[가-힣A-Za-z]{1,10}\d{0,2}\]/.test(block)) evidence += 6;
+
+  return evidence;
 }
 
 function detectQuestionAnchor(page: PageInfo, line: LineLite): Anchor | null {
   const text = normalizeText(line.text);
   const m = text.match(/^(\d{1,4})\s*\.\s*(?=\S|$)/);
   if (!m) return null;
-  if (isGuideNumberLine(text)) return null;
   const number = Number(m[1]);
   if (!Number.isFinite(number) || number < 1 || number > 9999) return null;
+  const body = numberedLineBody(text);
+  if (GUIDE_NUMBERED_HEAD_RE.test(body)) return null;
   const b = colBounds(page, line.col);
   const colWidth = Math.max(1, b.x2 - b.x1);
   const indentRatio = Math.max(0, line.x - b.x1) / colWidth;
   if (indentRatio > 0.42) return null;
-  let score = 42 + scoreLeftIndent(page, line);
+  const evidence = questionEvidenceScore(page, line);
+  if (evidence < 16) return null;
+  let score = 70 + scoreLeftIndent(page, line) + evidence;
   if (line.h >= 10) score += 3;
   if (/^\d{1,4}\s*\.\s*$/.test(text)) score -= 8;
   return {
@@ -1209,10 +1337,9 @@ async function parsePdfToImages(file: File, log: (msg: string, progress: number)
       hasQuestionPage: false
     };
     pageInfo.lines = buildLines(i, width, height, items);
-    const rawQuestionCandidates = pageInfo.lines
+    pageInfo.questionCandidates = pageInfo.lines
       .map(line => detectQuestionAnchor(pageInfo, line))
       .filter((a): a is Anchor => Boolean(a));
-    pageInfo.questionCandidates = filterQuestionCandidatesForPage(pageInfo, rawQuestionCandidates);
     pageInfo.hasQuestionPage = pageInfo.questionCandidates.length > 0;
     if (!pageInfo.hasQuestionPage) {
       pageInfo.solutionCandidates = pageInfo.lines
