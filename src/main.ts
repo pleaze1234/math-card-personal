@@ -679,24 +679,44 @@ type TextItemLite = {
   col: number;
 };
 
+type LineLite = {
+  pageNum: number;
+  cellIndex: number;
+  col: number;
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  items: TextItemLite[];
+};
+
+type AnchorType = 'question' | 'solution';
+type AnchorStyle = 'question-dot' | 'corner' | 'paren' | 'square';
+
+type Anchor = {
+  type: AnchorType;
+  style: AnchorStyle;
+  number: number;
+  pageNum: number;
+  cellIndex: number;
+  col: number;
+  x: number;
+  y: number;
+  h: number;
+  lineText: string;
+  score: number;
+};
+
 type PageInfo = {
   pageNum: number;
   width: number;
   height: number;
   items: TextItemLite[];
-  problemAnchors: Anchor[];
-  solutionAnchors: Anchor[];
-};
-
-type AnchorType = 'question' | 'solution';
-
-type Anchor = {
-  type: AnchorType;
-  number: number;
-  pageNum: number;
-  cellIndex: number;
-  col: number;
-  y: number;
+  lines: LineLite[];
+  questionCandidates: Anchor[];
+  solutionCandidates: Anchor[];
+  hasQuestionPage: boolean;
 };
 
 type Segment = {
@@ -766,20 +786,317 @@ async function handlePdfImport(file: File): Promise<void> {
 }
 
 function normalizeText(s: string): string {
-  return s.replace(/\s+/g, ' ').trim();
+  return String(s || '')
+    .replace(/[\uFF10-\uFF19]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0))
+    .replace(/[\uFF0E\u3002]/g, '.')
+    .replace(/[\uFF08]/g, '(')
+    .replace(/[\uFF09]/g, ')')
+    .replace(/[\u3014\u3016\u3018]/g, '[')
+    .replace(/[\u3015\u3017\u3019]/g, ']')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function detectProblemNumber(s: string): number | null {
-  const m = normalizeText(s).match(/^(\d{1,4})\./);
-  if (!m) return null;
-  return Number(m[1]);
+function isDecorativeLine(text: string): boolean {
+  const n = normalizeText(text);
+  if (!n) return true;
+  if (/^-\s*\d{1,4}\s*-$/.test(n)) return true;
+  if (/^\[?정답\]?$/.test(n)) return true;
+  if (/^Topic\s*\d/i.test(n)) return true;
+  if (/^Part[-\s]*\d/i.test(n)) return true;
+  return false;
 }
 
-function detectSolutionNumber(s: string): number | null {
-  const n = normalizeText(s);
-  const m = n.match(/^(?:\((\d{1,4})\)|\[(\d{1,4})\]|\u3010(\d{1,4})\u3011)/);
+function colBounds(page: PageInfo | { width: number; height: number }, col: number): { x1: number; x2: number; top: number; bottom: number } {
+  const gap = Math.max(10, page.width * 0.018);
+  const top = Math.max(8, page.height * 0.010);
+  const bottom = page.height - Math.max(32, page.height * 0.030);
+  if (col === 0) return { x1: 0, x2: page.width / 2 - gap, top, bottom };
+  return { x1: page.width / 2 + gap, x2: page.width, top, bottom };
+}
+
+function lineSort(a: LineLite, b: LineLite): number {
+  return a.cellIndex - b.cellIndex || a.y - b.y || a.x - b.x;
+}
+
+function anchorSort(a: Anchor, b: Anchor): number {
+  return a.cellIndex - b.cellIndex || a.y - b.y || a.x - b.x || a.number - b.number;
+}
+
+function buildLines(pageNum: number, width: number, height: number, items: TextItemLite[]): LineLite[] {
+  const lines: LineLite[] = [];
+  for (const col of [0, 1]) {
+    const colItems = items.filter(it => it.col === col).sort((a, b) => a.y - b.y || a.x - b.x);
+    const groups: TextItemLite[][] = [];
+    for (const item of colItems) {
+      const cy = item.y + item.h / 2;
+      const last = groups[groups.length - 1];
+      if (last) {
+        const lastCy = last.reduce((sum, it) => sum + it.y + it.h / 2, 0) / last.length;
+        const lastH = Math.max(...last.map(it => it.h));
+        const tol = Math.max(3.2, Math.min(9, Math.max(lastH, item.h) * 0.55));
+        if (Math.abs(cy - lastCy) <= tol) {
+          last.push(item);
+          continue;
+        }
+      }
+      groups.push([item]);
+    }
+    for (const group of groups) {
+      group.sort((a, b) => a.x - b.x);
+      const minX = Math.min(...group.map(it => it.x));
+      const minY = Math.min(...group.map(it => it.y));
+      const maxX = Math.max(...group.map(it => it.x + it.w));
+      const maxY = Math.max(...group.map(it => it.y + it.h));
+      const parts: string[] = [];
+      let prevRight: number | null = null;
+      for (const it of group) {
+        const gap = prevRight === null ? 0 : it.x - prevRight;
+        if (gap > Math.max(2.2, it.h * 0.20)) parts.push(' ');
+        parts.push(it.str);
+        prevRight = it.x + it.w;
+      }
+      const text = normalizeText(parts.join(''));
+      if (!text) continue;
+      lines.push({
+        pageNum,
+        cellIndex: (pageNum - 1) * 2 + col,
+        col,
+        text,
+        x: minX,
+        y: minY,
+        w: maxX - minX,
+        h: maxY - minY,
+        items: group
+      });
+    }
+  }
+  return lines.sort(lineSort);
+}
+
+function gapAbove(line: LineLite, lines: LineLite[]): number {
+  const previous = lines
+    .filter(l => l.col === line.col && l.y < line.y && !isDecorativeLine(l.text))
+    .sort((a, b) => b.y - a.y)[0];
+  if (!previous) return 999;
+  return line.y - (previous.y + previous.h);
+}
+
+function scoreLeftIndent(page: PageInfo | { width: number; height: number }, line: LineLite): number {
+  const b = colBounds(page, line.col);
+  const colWidth = Math.max(1, b.x2 - b.x1);
+  const indent = Math.max(0, line.x - b.x1);
+  const ratio = indent / colWidth;
+  if (ratio <= 0.16) return 18;
+  if (ratio <= 0.26) return 10;
+  if (ratio <= 0.36) return 2;
+  return -25;
+}
+
+function detectQuestionAnchor(page: PageInfo, line: LineLite): Anchor | null {
+  const text = normalizeText(line.text);
+  const m = text.match(/^(\d{1,4})\s*\.\s*(?=\S|$)/);
   if (!m) return null;
-  return Number(m[1] || m[2] || m[3]);
+  const number = Number(m[1]);
+  if (!Number.isFinite(number) || number < 1 || number > 9999) return null;
+  const b = colBounds(page, line.col);
+  const colWidth = Math.max(1, b.x2 - b.x1);
+  const indentRatio = Math.max(0, line.x - b.x1) / colWidth;
+  if (indentRatio > 0.42) return null;
+  let score = 70 + scoreLeftIndent(page, line);
+  if (line.h >= 10) score += 3;
+  if (/^\d{1,4}\s*\.\s*$/.test(text)) score -= 8;
+  return {
+    type: 'question',
+    style: 'question-dot',
+    number,
+    pageNum: line.pageNum,
+    cellIndex: line.cellIndex,
+    col: line.col,
+    x: line.x,
+    y: line.y,
+    h: line.h,
+    lineText: line.text,
+    score
+  };
+}
+
+function detectSolutionAnchor(page: PageInfo, line: LineLite): Anchor | null {
+  const text = normalizeText(line.text);
+  const patterns: Array<{ style: AnchorStyle; re: RegExp; weight: number }> = [
+    { style: 'corner', re: /^【\s*(\d{1,4})\s*】/, weight: 70 },
+    { style: 'paren', re: /^\(\s*(\d{1,4})\s*\)/, weight: 36 },
+    { style: 'square', re: /^\[\s*(\d{1,4})\s*\]/, weight: 34 }
+  ];
+  for (const pat of patterns) {
+    const m = text.match(pat.re);
+    if (!m) continue;
+    const number = Number(m[1]);
+    if (!Number.isFinite(number) || number < 1 || number > 9999) return null;
+    const b = colBounds(page, line.col);
+    const colWidth = Math.max(1, b.x2 - b.x1);
+    const indentRatio = Math.max(0, line.x - b.x1) / colWidth;
+    if (indentRatio > 0.52) return null;
+    const gap = gapAbove(line, page.lines);
+    let score = pat.weight + scoreLeftIndent(page, line);
+    if (/정답|답\s*[:;]|sol\)?|풀이|해설/i.test(text)) score += 34;
+    if (gap > 24) score += 18;
+    else if (gap > 10) score += 8;
+    else if (gap < -2) score -= 8;
+    if (text.length <= 42) score += 4;
+    if (/^\(\d+\)\s*[가-힣a-zA-Z]/.test(text) && !/정답|답\s*[:;]|sol\)?|풀이|해설/i.test(text)) score -= 24;
+    return {
+      type: 'solution',
+      style: pat.style,
+      number,
+      pageNum: line.pageNum,
+      cellIndex: line.cellIndex,
+      col: line.col,
+      x: line.x,
+      y: line.y,
+      h: line.h,
+      lineText: line.text,
+      score
+    };
+  }
+  return null;
+}
+
+function selectMonotonicAnchors(candidates: Anchor[], maxNumber?: number): Anchor[] {
+  const arr = candidates
+    .filter(c => c.number >= 1 && (!maxNumber || c.number <= maxNumber))
+    .sort(anchorSort);
+  if (!arr.length) return [];
+  const n = arr.length;
+  const dp = new Array<number>(n).fill(0);
+  const prev = new Array<number>(n).fill(-1);
+  for (let i = 0; i < n; i++) {
+    dp[i] = Math.max(1, arr[i].score);
+    for (let j = 0; j < i; j++) {
+      if (arr[j].number >= arr[i].number) continue;
+      const jump = arr[i].number - arr[j].number;
+      const continuity = jump === 1 ? 14 : jump <= 4 ? 3 : -Math.min(30, Math.log2(jump) * 5);
+      const candidateScore = dp[j] + Math.max(1, arr[i].score) + continuity;
+      if (candidateScore > dp[i]) {
+        dp[i] = candidateScore;
+        prev[i] = j;
+      }
+    }
+  }
+  let best = 0;
+  for (let i = 1; i < n; i++) if (dp[i] > dp[best]) best = i;
+  const selected: Anchor[] = [];
+  for (let cur = best; cur >= 0; cur = prev[cur]) selected.push(arr[cur]);
+  selected.reverse();
+  return selected;
+}
+
+function chooseSolutionStyle(candidates: Anchor[], maxNumber?: number): AnchorStyle | null {
+  const styles: AnchorStyle[] = ['corner', 'paren', 'square'];
+  let bestStyle: AnchorStyle | null = null;
+  let bestQuality = -Infinity;
+  for (const style of styles) {
+    const subset = candidates.filter(c => c.style === style && (!maxNumber || c.number <= maxNumber));
+    if (!subset.length) continue;
+    const seq = selectMonotonicAnchors(subset, maxNumber);
+    const unique = new Set(seq.map(c => c.number)).size;
+    const keywordHits = seq.filter(c => /정답|답\s*[:;]|sol\)?|풀이|해설/i.test(normalizeText(c.lineText))).length;
+    const quality = unique * 100 + keywordHits * 18 + seq.reduce((sum, c) => sum + c.score, 0) / Math.max(1, seq.length);
+    if (quality > bestQuality) {
+      bestQuality = quality;
+      bestStyle = style;
+    }
+  }
+  return bestStyle;
+}
+
+function pageByNum(pages: PageInfo[], pageNum: number): PageInfo {
+  const p = pages[pageNum - 1];
+  if (!p) throw new Error(`Missing page ${pageNum}`);
+  return p;
+}
+
+function hasRealContent(page: PageInfo, col: number, y1: number, y2: number): boolean {
+  return page.lines.some(line => line.col === col && line.y + line.h > y1 && line.y < y2 && !isDecorativeLine(line.text));
+}
+
+function firstContentY(page: PageInfo, col: number, y1: number, y2: number): number | null {
+  const line = page.lines
+    .filter(l => l.col === col && l.y + l.h > y1 && l.y < y2 && !isDecorativeLine(l.text))
+    .sort((a, b) => a.y - b.y)[0];
+  return line ? line.y : null;
+}
+
+function lastContentBottom(page: PageInfo, col: number, y1: number, y2: number): number | null {
+  const line = page.lines
+    .filter(l => l.col === col && l.y + l.h > y1 && l.y < y2 && !isDecorativeLine(l.text))
+    .sort((a, b) => b.y - a.y)[0];
+  return line ? line.y + line.h : null;
+}
+
+function allowedCellSet(pages: PageInfo[], type: AnchorType, anchors: Anchor[]): Set<number> {
+  const allowed = new Set<number>();
+  if (!anchors.length) return allowed;
+  const firstPage = Math.min(...anchors.map(a => a.pageNum));
+  const lastPage = Math.max(...anchors.map(a => a.pageNum));
+  for (const page of pages) {
+    if (type === 'question') {
+      if (page.hasQuestionPage && page.pageNum >= firstPage && page.pageNum <= lastPage) {
+        allowed.add((page.pageNum - 1) * 2);
+        allowed.add((page.pageNum - 1) * 2 + 1);
+      }
+    } else {
+      if (!page.hasQuestionPage && page.pageNum >= firstPage) {
+        allowed.add((page.pageNum - 1) * 2);
+        allowed.add((page.pageNum - 1) * 2 + 1);
+      }
+    }
+  }
+  return allowed;
+}
+
+function buildSegments(anchors: Anchor[], pages: PageInfo[], type: AnchorType): Segment[] {
+  const segments: Segment[] = [];
+  const sorted = anchors.sort(anchorSort);
+  if (!sorted.length) return segments;
+  const allowed = allowedCellSet(pages, type, sorted);
+  const allowedCells = Array.from(allowed).sort((a, b) => a - b);
+  const lastAllowedCell = allowedCells[allowedCells.length - 1] ?? sorted[sorted.length - 1].cellIndex;
+  for (let i = 0; i < sorted.length; i++) {
+    const start = sorted[i];
+    const end = sorted[i + 1] || null;
+    const key = `${type}:${start.number}`;
+    const endCellLimit = end ? end.cellIndex : lastAllowedCell;
+    let order = 0;
+    for (let cell = start.cellIndex; cell <= endCellLimit; cell++) {
+      if (!allowed.has(cell)) continue;
+      const pageNum = Math.floor(cell / 2) + 1;
+      const col = cell % 2;
+      const page = pageByNum(pages, pageNum);
+      const bounds = colBounds(page, col);
+      let y1 = bounds.top;
+      let y2 = bounds.bottom;
+      if (cell === start.cellIndex) {
+        y1 = Math.max(bounds.top, start.y - Math.max(6, start.h * 0.45));
+      } else {
+        const firstY = firstContentY(page, col, bounds.top, bounds.bottom);
+        if (firstY === null) continue;
+        y1 = Math.max(bounds.top, firstY - 8);
+      }
+      if (end && cell === end.cellIndex) {
+        y2 = Math.min(bounds.bottom, end.y - Math.max(5, end.h * 0.35));
+      } else {
+        const lastBottom = lastContentBottom(page, col, y1, bounds.bottom);
+        if (lastBottom !== null) y2 = Math.min(bounds.bottom, lastBottom + 10);
+      }
+      if (!hasRealContent(page, col, y1, y2)) continue;
+      if (y2 - y1 > 22) {
+        segments.push({ key, type, number: start.number, pageNum, col, y1, y2, order: order++ });
+      }
+    }
+  }
+  return segments;
 }
 
 async function parsePdfToImages(file: File, log: (msg: string, progress: number) => void): Promise<ParsedCardImages[]> {
@@ -801,96 +1118,62 @@ async function parsePdfToImages(file: File, log: (msg: string, progress: number)
       const tr = (pdfjsLib as any).Util.transform(viewport.transform, raw.transform);
       const x = Number(tr[4]) || 0;
       const yBase = Number(tr[5]) || 0;
-      const h = Math.abs(Number(raw.height || tr[3] || 10));
+      const h = Math.max(4, Math.abs(Number(raw.height || tr[3] || 10)));
       const y = Math.max(0, yBase - h);
-      const w = Math.abs(Number(raw.width || tr[0] || 10));
+      const w = Math.max(1, Math.abs(Number(raw.width || tr[0] || 10)));
       items.push({ str: String(raw.str), x, y, w, h, col: x < width / 2 ? 0 : 1 });
     }
-    const problemAnchors: Anchor[] = [];
-    const solutionAnchors: Anchor[] = [];
-    for (const it of items) {
-      const pnum = detectProblemNumber(it.str);
-      if (pnum !== null && it.x < width - 40) {
-        problemAnchors.push({ type: 'question', number: pnum, pageNum: i, cellIndex: (i - 1) * 2 + it.col, col: it.col, y: it.y });
-      }
+    const pageInfo: PageInfo = {
+      pageNum: i,
+      width,
+      height,
+      items,
+      lines: [],
+      questionCandidates: [],
+      solutionCandidates: [],
+      hasQuestionPage: false
+    };
+    pageInfo.lines = buildLines(i, width, height, items);
+    pageInfo.questionCandidates = pageInfo.lines
+      .map(line => detectQuestionAnchor(pageInfo, line))
+      .filter((a): a is Anchor => Boolean(a));
+    pageInfo.hasQuestionPage = pageInfo.questionCandidates.length > 0;
+    if (!pageInfo.hasQuestionPage) {
+      pageInfo.solutionCandidates = pageInfo.lines
+        .map(line => detectSolutionAnchor(pageInfo, line))
+        .filter((a): a is Anchor => Boolean(a));
     }
-    if (problemAnchors.length === 0) {
-      for (const it of items) {
-        const snum = detectSolutionNumber(it.str);
-        if (snum !== null) {
-          solutionAnchors.push({ type: 'solution', number: snum, pageNum: i, cellIndex: (i - 1) * 2 + it.col, col: it.col, y: it.y });
-        }
-      }
-    }
-    problemAnchors.sort(anchorSort);
-    solutionAnchors.sort(anchorSort);
-    pages.push({ pageNum: i, width, height, items, problemAnchors, solutionAnchors });
+    pages.push(pageInfo);
     if (i % 5 === 0 || i === pageCount) log(`scan ${i}/${pageCount}`, 0.02 + 0.30 * (i / pageCount));
   }
 
-  const questions = pages.flatMap(p => p.problemAnchors).sort(anchorSort);
-  const solutions = pages.flatMap(p => p.solutionAnchors).sort(anchorSort);
-  log(`anchors: question ${questions.length}, solution ${solutions.length}`, 0.35);
+  const qCandidates = pages.flatMap(p => p.questionCandidates).sort(anchorSort);
+  const questions = selectMonotonicAnchors(qCandidates).sort(anchorSort);
+  const maxQuestionNumber = questions.length ? Math.max(...questions.map(q => q.number)) : undefined;
+  const rawSolutionCandidates = pages.flatMap(p => p.solutionCandidates).filter(s => !maxQuestionNumber || s.number <= maxQuestionNumber + 5).sort(anchorSort);
+  const chosenStyle = chooseSolutionStyle(rawSolutionCandidates, maxQuestionNumber ? maxQuestionNumber + 5 : undefined);
+  const solutionCandidates = chosenStyle ? rawSolutionCandidates.filter(s => s.style === chosenStyle) : rawSolutionCandidates;
+  const solutions = selectMonotonicAnchors(solutionCandidates, maxQuestionNumber ? maxQuestionNumber + 5 : undefined).sort(anchorSort);
+
+  log(`anchors: question ${questions.length}/${qCandidates.length}, solution ${solutions.length}/${rawSolutionCandidates.length}${chosenStyle ? ` style=${chosenStyle}` : ''}`, 0.35);
+
   const qSegments = buildSegments(questions, pages, 'question');
   const sSegments = buildSegments(solutions, pages, 'solution');
-  const chunks = await renderSegments(pdf, pages, [...qSegments, ...sSegments], log);
+  log(`segments: question ${qSegments.length}, solution ${sSegments.length}`, 0.38);
 
+  const chunks = await renderSegments(pdf, pages, [...qSegments, ...sSegments], log);
   const questionMap = await mergeChunks(chunks, 'question', log, 0.82, 0.90);
   const solutionMap = await mergeChunks(chunks, 'solution', log, 0.90, 0.98);
+
   const result: ParsedCardImages[] = [];
-  for (const [num, qImg] of questionMap.entries()) {
+  const nums = Array.from(questionMap.keys()).sort((a, b) => a - b);
+  for (const num of nums) {
+    const qImg = questionMap.get(num) || '';
     const sImg = solutionMap.get(num) || '';
-    if (qImg && sImg) result.push({ number: num, questionImage: qImg, solutionImage: sImg });
-    else if (qImg) result.push({ number: num, questionImage: qImg, solutionImage: sImg });
+    if (qImg) result.push({ number: num, questionImage: qImg, solutionImage: sImg });
   }
-  result.sort((a, b) => a.number - b.number);
   log(`matched: ${result.filter(x => x.solutionImage).length}/${result.length}`, 1);
   return result;
-}
-
-function anchorSort(a: Anchor, b: Anchor): number {
-  return a.cellIndex - b.cellIndex || a.y - b.y || a.number - b.number;
-}
-
-function pageByNum(pages: PageInfo[], pageNum: number): PageInfo {
-  const p = pages[pageNum - 1];
-  if (!p) throw new Error(`Missing page ${pageNum}`);
-  return p;
-}
-
-function colBounds(page: PageInfo, col: number): { x1: number; x2: number; top: number; bottom: number } {
-  const gap = Math.max(8, page.width * 0.018);
-  const top = Math.max(10, page.height * 0.012);
-  const bottom = page.height - Math.max(28, page.height * 0.025);
-  if (col === 0) return { x1: 0, x2: page.width / 2 - gap, top, bottom };
-  return { x1: page.width / 2 + gap, x2: page.width, top, bottom };
-}
-
-function buildSegments(anchors: Anchor[], pages: PageInfo[], type: AnchorType): Segment[] {
-  const segments: Segment[] = [];
-  for (let i = 0; i < anchors.length; i++) {
-    const start = anchors[i];
-    const end = anchors[i + 1] || null;
-    const key = `${type}:${start.number}`;
-    const startCell = start.cellIndex;
-    const endCell = end ? end.cellIndex : (type === 'question' ? start.cellIndex : pages.length * 2);
-    let order = 0;
-    for (let cell = startCell; cell <= Math.min(endCell, pages.length * 2 - 1); cell++) {
-      const pageNum = Math.floor(cell / 2) + 1;
-      const col = cell % 2;
-      const page = pageByNum(pages, pageNum);
-      const bounds = colBounds(page, col);
-      let y1 = bounds.top;
-      let y2 = bounds.bottom;
-      if (cell === startCell) y1 = Math.max(bounds.top, start.y - 8);
-      if (end && cell === endCell) y2 = Math.min(bounds.bottom, end.y - 8);
-      if (y2 - y1 > 24) {
-        segments.push({ key, type, number: start.number, pageNum, col, y1, y2, order: order++ });
-      }
-      if (end && cell === endCell) break;
-    }
-  }
-  return segments;
 }
 
 type ChunkEntry = {
@@ -931,12 +1214,12 @@ async function renderSegments(pdf: any, pages: PageInfo[], segments: Segment[], 
       crop.width = sw;
       crop.height = sh;
       crop.getContext('2d')!.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
-      const trimmed = trimCanvas(crop, 245, Math.round(10 * renderScale));
+      const trimmed = trimCanvas(crop, 246, Math.round(12 * renderScale));
       if (trimmed.width > 20 && trimmed.height > 20) {
         chunks.push({ key: seg.key, type: seg.type, number: seg.number, order: seg.order, dataUrl: trimmed.toDataURL('image/jpeg', 0.86) });
       }
     }
-    log(`render ${idx + 1}/${pageNums.length}`, 0.35 + 0.45 * ((idx + 1) / pageNums.length));
+    log(`render ${idx + 1}/${pageNums.length}`, 0.40 + 0.40 * ((idx + 1) / Math.max(1, pageNums.length)));
   }
   return chunks;
 }
@@ -1016,6 +1299,7 @@ async function mergeDataUrls(urls: string[]): Promise<string> {
   }
   return canvas.toDataURL('image/jpeg', 0.86);
 }
+
 
 (async function boot() {
   await refresh();
